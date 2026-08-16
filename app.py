@@ -77,7 +77,7 @@ require_passcode()
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def run_screen(trade_date: str, basis: str, min_days: int,
-               band_low: float, band_high: float):
+               band_low: float, band_high: float, min_avg_vol):
     universe = screener.load_universe()
     bar = st.progress(0.0, text="Fetching prices from Yahoo Finance…")
 
@@ -86,7 +86,8 @@ def run_screen(trade_date: str, basis: str, min_days: int,
 
     results, stats = screener.fetch_and_screen(
         universe, basis=basis, min_days=min_days,
-        band_low=band_low, band_high=band_high, progress_cb=_cb,
+        band_low=band_low, band_high=band_high, min_avg_vol=min_avg_vol,
+        progress_cb=_cb,
     )
     bar.empty()
     # ScreenStats isn't picklable-friendly for display; return a plain dict too
@@ -141,6 +142,19 @@ with st.sidebar:
             help="Keep stocks whose close is this % below the 52-week high.",
         )
 
+        use_vol_filter = st.checkbox(
+            "Apply minimum volume filter",
+            value=False,
+            help="Off by default. When on, drop stocks below the average-volume "
+                 "threshold below.",
+        )
+        vol_threshold = st.number_input(
+            "Min 20-day avg daily volume",
+            min_value=0, value=screener.DEFAULT_MIN_AVG_VOL, step=5000,
+            disabled=not use_vol_filter,
+            help="Stocks with average daily volume below this are excluded.",
+        )
+
     run = st.button("▶ Run screener", type="primary", use_container_width=True)
     if st.button("↻ Refresh data (clear cache)", use_container_width=True):
         st.cache_data.clear()
@@ -154,9 +168,10 @@ with st.sidebar:
 if run or st.session_state.get("has_run"):
     st.session_state.has_run = True
     trade_date = datetime.now(IST).strftime("%Y-%m-%d")
+    min_avg_vol = int(vol_threshold) if use_vol_filter else None
     with st.spinner("Running screener…"):
         results, stats = run_screen(trade_date, basis, int(min_days),
-                                    float(band_low), float(band_high))
+                                    float(band_low), float(band_high), min_avg_vol)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Universe", stats["universe"])
@@ -164,9 +179,11 @@ if run or st.session_state.get("has_run"):
     c3.metric("Matches", stats["matched"])
     c4.metric("As of", stats["as_of"] or "—")
 
+    vol_txt = (f"min avg vol **{min_avg_vol:,}**" if min_avg_vol
+               else "volume filter **off**")
     st.caption(
         f"Basis: **{basis_label}**  •  high older than **{int(min_days)}d**  •  "
-        f"pullback **{band_low:g}–{band_high:g}%**  •  "
+        f"pullback **{band_low:g}–{band_high:g}%**  •  {vol_txt}  •  "
         f"no data: {stats['skipped_no_data']}, short history: "
         f"{stats['skipped_short_history']}"
     )

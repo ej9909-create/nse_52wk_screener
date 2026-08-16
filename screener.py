@@ -38,6 +38,7 @@ SPLIT_JUMP_PCT = 35.0           # flag a likely split/bonus if a 1-day move exce
 DEFAULT_MIN_DAYS = 90           # "3 months"
 DEFAULT_BAND_LOW = 1.0          # % below high (min pullback)
 DEFAULT_BAND_HIGH = 10.0        # % below high (max pullback)
+DEFAULT_MIN_AVG_VOL = 30000     # min 20-day avg daily volume when the filter is ON
 
 RESULT_COLUMNS = [
     "Symbol", "Company", "LastClose", "52wHigh", "HighDate",
@@ -178,10 +179,14 @@ def fetch_and_screen(
     min_days: int = DEFAULT_MIN_DAYS,
     band_low: float = DEFAULT_BAND_LOW,
     band_high: float = DEFAULT_BAND_HIGH,
+    min_avg_vol: float | None = None,
     progress_cb=None,
 ) -> tuple[pd.DataFrame, ScreenStats]:
     """
-    Download prices for the whole universe and apply the two filters.
+    Download prices for the whole universe and apply the filters.
+
+    `min_avg_vol` is optional: when None the volume filter is OFF; when set,
+    stocks whose 20-day average daily volume is below it are dropped.
 
     Returns (results_df, stats). `progress_cb(done, total)` is called after each
     batch so the UI can render a progress bar.
@@ -227,6 +232,8 @@ def fetch_and_screen(
                 if metrics["DaysSinceHigh"] <= min_days:
                     continue
                 if not (band_low <= metrics["PctFromHigh"] <= band_high):
+                    continue
+                if min_avg_vol is not None and metrics["AvgVol20d"] < min_avg_vol:
                     continue
                 rows.append({
                     "Symbol": sym,

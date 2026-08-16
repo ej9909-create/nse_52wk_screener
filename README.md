@@ -24,7 +24,7 @@ with your group.
 | `HighDate` | Most recent date that high was touched |
 | `DaysSinceHigh` | Days since `HighDate` (must be > 90 to qualify) |
 | `PctFromHigh` | How far below the high, in % (must be 1–10 to qualify) |
-| `AvgVol20d` | Average daily volume over the last 20 sessions (info only — no filtering) |
+| `AvgVol20d` | Average daily volume over the last 20 sessions (shown always; optionally filtered) |
 | `Basis` | Whether the high used Intraday High or Daily Close |
 
 Results are sorted by `PctFromHigh` ascending (closest to the high first).
@@ -112,3 +112,6 @@ git add data/nse_equity_list.csv && git commit -m "refresh universe" && git push
 - **SME/Emerge not included** — this is main board only (Yahoo's SME coverage is
   patchy). Can be added later via an NSE-bhavcopy data layer if needed.
 - Adjust the 3-month age and the 1–10% band any time under **Advanced filters**.
+- **Volume filter is opt-in** (off by default). Tick *Apply minimum volume filter*
+  under Advanced filters to drop stocks whose 20-day average daily volume is below
+  the threshold (default 30,000).
