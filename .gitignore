@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Streamlit secrets — NEVER commit the real passcode
+.streamlit/secrets.toml
+
+# Local outputs
+output/
+*.xlsx
