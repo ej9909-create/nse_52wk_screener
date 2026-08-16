@@ -112,6 +112,8 @@ git add data/nse_equity_list.csv && git commit -m "refresh universe" && git push
 - **SME/Emerge not included** — this is main board only (Yahoo's SME coverage is
   patchy). Can be added later via an NSE-bhavcopy data layer if needed.
 - Adjust the 3-month age and the 1–10% band any time under **Advanced filters**.
-- **Volume filter is opt-in** (off by default). Tick *Apply minimum volume filter*
-  under Advanced filters to drop stocks whose 20-day average daily volume is below
-  the threshold (default 30,000).
+- **Volume filter is opt-in** (off by default). Tick *Apply volume filter* under
+  Advanced filters, then the end user chooses the **direction**:
+  *Above threshold* keeps only liquid stocks (avg vol ≥ threshold), *Below
+  threshold* keeps only thin stocks (avg vol ≤ threshold). Threshold defaults to
+  30,000 (20-day average daily volume).

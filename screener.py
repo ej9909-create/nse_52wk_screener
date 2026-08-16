@@ -179,14 +179,19 @@ def fetch_and_screen(
     min_days: int = DEFAULT_MIN_DAYS,
     band_low: float = DEFAULT_BAND_LOW,
     band_high: float = DEFAULT_BAND_HIGH,
-    min_avg_vol: float | None = None,
+    vol_threshold: float | None = None,
+    vol_keep: str = "above",
     progress_cb=None,
 ) -> tuple[pd.DataFrame, ScreenStats]:
     """
     Download prices for the whole universe and apply the filters.
 
-    `min_avg_vol` is optional: when None the volume filter is OFF; when set,
-    stocks whose 20-day average daily volume is below it are dropped.
+    Volume filter (optional): when `vol_threshold` is None it is OFF. When set,
+    the end user chooses the direction via `vol_keep`:
+      - "above" -> keep stocks with 20-day avg daily volume >= threshold
+                   (exclude low-volume / illiquid names)
+      - "below" -> keep stocks with 20-day avg daily volume <= threshold
+                   (exclude heavily-traded names)
 
     Returns (results_df, stats). `progress_cb(done, total)` is called after each
     batch so the UI can render a progress bar.
@@ -233,8 +238,14 @@ def fetch_and_screen(
                     continue
                 if not (band_low <= metrics["PctFromHigh"] <= band_high):
                     continue
-                if min_avg_vol is not None and metrics["AvgVol20d"] < min_avg_vol:
-                    continue
+                if vol_threshold is not None:
+                    v = metrics["AvgVol20d"]
+                    if vol_keep == "below":
+                        if v > vol_threshold:
+                            continue
+                    else:  # "above"
+                        if v < vol_threshold:
+                            continue
                 rows.append({
                     "Symbol": sym,
                     "Company": name_by_ticker[t],

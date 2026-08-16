@@ -77,7 +77,7 @@ require_passcode()
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def run_screen(trade_date: str, basis: str, min_days: int,
-               band_low: float, band_high: float, min_avg_vol):
+               band_low: float, band_high: float, vol_threshold, vol_keep: str):
     universe = screener.load_universe()
     bar = st.progress(0.0, text="Fetching prices from Yahoo Finance…")
 
@@ -86,7 +86,8 @@ def run_screen(trade_date: str, basis: str, min_days: int,
 
     results, stats = screener.fetch_and_screen(
         universe, basis=basis, min_days=min_days,
-        band_low=band_low, band_high=band_high, min_avg_vol=min_avg_vol,
+        band_low=band_low, band_high=band_high,
+        vol_threshold=vol_threshold, vol_keep=vol_keep,
         progress_cb=_cb,
     )
     bar.empty()
@@ -143,16 +144,26 @@ with st.sidebar:
         )
 
         use_vol_filter = st.checkbox(
-            "Apply minimum volume filter",
+            "Apply volume filter",
             value=False,
-            help="Off by default. When on, drop stocks below the average-volume "
-                 "threshold below.",
+            help="Off by default. When on, filter stocks by 20-day average "
+                 "daily volume using the direction and threshold below.",
         )
+        vol_dir_label = st.radio(
+            "Volume filter direction",
+            ["Above threshold (exclude low-volume)",
+             "Below threshold (exclude high-volume)"],
+            index=0,
+            disabled=not use_vol_filter,
+            help="Above: keep only liquid stocks (avg vol ≥ threshold). "
+                 "Below: keep only thin stocks (avg vol ≤ threshold).",
+        )
+        vol_keep = "above" if vol_dir_label.startswith("Above") else "below"
         vol_threshold = st.number_input(
-            "Min 20-day avg daily volume",
+            "20-day avg daily volume threshold",
             min_value=0, value=screener.DEFAULT_MIN_AVG_VOL, step=5000,
             disabled=not use_vol_filter,
-            help="Stocks with average daily volume below this are excluded.",
+            help="The volume cutoff; direction above decides keep ≥ or keep ≤.",
         )
 
     run = st.button("▶ Run screener", type="primary", use_container_width=True)
@@ -168,10 +179,10 @@ with st.sidebar:
 if run or st.session_state.get("has_run"):
     st.session_state.has_run = True
     trade_date = datetime.now(IST).strftime("%Y-%m-%d")
-    min_avg_vol = int(vol_threshold) if use_vol_filter else None
+    vt = int(vol_threshold) if use_vol_filter else None
     with st.spinner("Running screener…"):
         results, stats = run_screen(trade_date, basis, int(min_days),
-                                    float(band_low), float(band_high), min_avg_vol)
+                                    float(band_low), float(band_high), vt, vol_keep)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Universe", stats["universe"])
@@ -179,8 +190,11 @@ if run or st.session_state.get("has_run"):
     c3.metric("Matches", stats["matched"])
     c4.metric("As of", stats["as_of"] or "—")
 
-    vol_txt = (f"min avg vol **{min_avg_vol:,}**" if min_avg_vol
-               else "volume filter **off**")
+    if vt:
+        _op = "≥" if vol_keep == "above" else "≤"
+        vol_txt = f"avg vol **{_op} {vt:,}**"
+    else:
+        vol_txt = "volume filter **off**"
     st.caption(
         f"Basis: **{basis_label}**  •  high older than **{int(min_days)}d**  •  "
         f"pullback **{band_low:g}–{band_high:g}%**  •  {vol_txt}  •  "
