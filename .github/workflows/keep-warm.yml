@@ -1,0 +1,30 @@
+name: keep-warm
+
+# Pings the deployed Streamlit app so the free tier doesn't put it to sleep,
+# keeping the first open of the day instant for the group.
+#
+# Cron is in UTC. Indian market hours 09:15-15:30 IST == 03:45-10:00 UTC.
+# We ping every 15 min from 03:30-11:00 UTC, Mon-Fri, with a little padding.
+
+on:
+  schedule:
+    - cron: "*/15 3-11 * * 1-5"
+  workflow_dispatch: {}        # lets you run it manually from the Actions tab
+
+# Avoid overlapping runs if one is slow.
+concurrency:
+  group: keep-warm
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping the app
+        run: |
+          URL="https://nse-52wk-screener.streamlit.app"
+          echo "Pinging $URL ..."
+          # Never fail the job (a transient non-200 shouldn't spam failure emails).
+          curl -sSL -o /dev/null -w "root:   %{http_code}\n" --max-time 60 "$URL" || true
+          curl -sSL -o /dev/null -w "health: %{http_code}\n" --max-time 60 "$URL/_stcore/health" || true
+          echo "done"
