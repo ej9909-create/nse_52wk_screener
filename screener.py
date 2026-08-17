@@ -14,6 +14,7 @@ call NSE directly (NSE blocks most cloud IPs).
 
 from __future__ import annotations
 
+import gc
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -31,7 +32,7 @@ except Exception:  # pragma: no cover
 LOOKBACK_WINDOW_DAYS = 365      # "52 weeks" for the high computation
 FETCH_DAYS = 420                # calendar days of history to pull (buffer > 365)
 MIN_TRADING_DAYS = 200          # skip stocks with too little history for a 52wk high
-BATCH_SIZE = 100                # tickers per yfinance download call
+BATCH_SIZE = 50                 # tickers per yfinance download call (smaller = lower peak RAM)
 AVG_VOL_DAYS = 20               # window for the average-volume column
 SPLIT_JUMP_PCT = 35.0           # flag a likely split/bonus if a 1-day move exceeds this
 
@@ -120,6 +121,11 @@ def _extract_one(data: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
     sub = sub.dropna(how="all")
     if sub.empty or "Close" not in sub.columns:
         return None
+    # keep only what we use and downcast to float32 to trim memory
+    keep = [c for c in ("High", "Close", "Volume") if c in sub.columns]
+    sub = sub[keep].copy()
+    for c in keep:
+        sub[c] = pd.to_numeric(sub[c], downcast="float")
     return sub
 
 
@@ -257,6 +263,9 @@ def fetch_and_screen(
                     "AvgVol20d": metrics["AvgVol20d"],
                     "Basis": "Intraday High" if basis == "high" else "Daily Close",
                 })
+        # release this batch's raw frame before fetching the next one
+        del data
+        gc.collect()
         done += len(batch)
         if progress_cb:
             progress_cb(min(done, total), total)
