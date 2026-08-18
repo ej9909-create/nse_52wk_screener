@@ -22,9 +22,14 @@ jobs:
     steps:
       - name: Ping the app
         run: |
-          URL="https://nse-52wk-screener.streamlit.app"
+          URL="https://nse-52wk-screener.streamlit.app/"
+          CJ="$(mktemp)"
           echo "Pinging $URL ..."
-          # Never fail the job (a transient non-200 shouldn't spam failure emails).
-          curl -sSL -o /dev/null -w "root:   %{http_code}\n" --max-time 60 "$URL" || true
-          curl -sSL -o /dev/null -w "health: %{http_code}\n" --max-time 60 "$URL/_stcore/health" || true
-          echo "done"
+          # A cookie jar is REQUIRED: Streamlit Cloud bounces the first hit through
+          # a cookie/login redirect. Without -c/-b, curl loops there and never wakes
+          # the app container. With it, we complete the handshake and land on 200.
+          code=$(curl -sSL -c "$CJ" -b "$CJ" -o /dev/null \
+                      -w "%{http_code}" --max-time 90 "$URL" || echo "000")
+          echo "app responded: HTTP $code"
+          # Don't fail the job on a transient non-200 (avoids failure-email spam).
+          [ "$code" = "200" ] && echo "app is awake ✅" || echo "note: non-200 (transient?)"
