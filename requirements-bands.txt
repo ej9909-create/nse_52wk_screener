@@ -1,6 +1,9 @@
 # Deps for the nightly price-band job only (NOT installed by the Streamlit app).
+# smartapi-python under-declares its deps, so we list its runtime imports explicitly.
 smartapi-python
-logzero          # imported by smartapi-python but not declared as its dependency
+logzero              # imported by smartapi-python, not declared
+websocket-client     # provides the `websocket` module smartapi-python imports
+python-dateutil      # used by smartapi-python
 pyotp
 requests
 pandas
