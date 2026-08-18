@@ -47,13 +47,14 @@ jobs:
 
       - name: Commit updated bands
         run: |
-          if ! git diff --quiet -- data/price_bands.csv 2>/dev/null; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add data/price_bands.csv
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/price_bands.csv
+          # --cached detects both a brand-new file and edits to a tracked one
+          if git diff --cached --quiet; then
+            echo "no band changes to commit"
+          else
             git commit -m "Update price bands ($(date -u +%Y-%m-%d))"
             git push
             echo "committed fresh bands"
-          else
-            echo "no band changes to commit"
           fi
