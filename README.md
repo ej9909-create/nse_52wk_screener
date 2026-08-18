@@ -85,6 +85,19 @@ passcode stops working within seconds — no redeploy needed.
 
 ---
 
+## Keeping the app awake (no cold starts)
+The free tier sleeps an app after inactivity. A GitHub Action
+(`.github/workflows/keep-warm.yml`) pings the app every 15 min on weekdays during
+Indian market hours so the group always gets an instant load. It uses a cookie jar
+so the ping completes Streamlit Cloud's redirect handshake and actually reaches the
+app (HTTP 200), rather than bouncing off the edge.
+
+- Watch it under the repo's **Actions** tab; run it manually via **Run workflow**.
+- **Caveat:** GitHub auto-disables scheduled workflows after **60 days with no repo
+  activity**. If you rarely push, either push a trivial commit occasionally, or
+  re-enable it from the Actions tab. (Alternatively, a free external pinger like
+  UptimeRobot avoids this.)
+
 ## Daily use
 Run it **after market close**. The first person to run it that day triggers the
 ~2-minute fetch of ~2,000 stocks; everyone else gets the same cached list instantly
