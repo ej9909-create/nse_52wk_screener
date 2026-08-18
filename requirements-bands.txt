@@ -1,5 +1,6 @@
 # Deps for the nightly price-band job only (NOT installed by the Streamlit app).
 smartapi-python
+logzero          # imported by smartapi-python but not declared as its dependency
 pyotp
 requests
 pandas
