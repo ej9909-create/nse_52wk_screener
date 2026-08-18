@@ -25,9 +25,55 @@ with your group.
 | `DaysSinceHigh` | Days since `HighDate` (must be > 90 to qualify) |
 | `PctFromHigh` | How far below the high, in % (must be 1–10 to qualify) |
 | `AvgVol20d` | Average daily volume over the last 20 sessions (shown always; optionally filtered) |
+| `F&O` | Whether the stock has futures/options (Yes/No; shown always, optionally filtered) |
+| `Band%` | Daily price band (20 / 10 / 5 / 2, `NB` = no band for F&O, `—` = unknown) |
 | `Basis` | Whether the high used Intraday High or Daily Close |
 
 Results are sorted by `PctFromHigh` ascending (closest to the high first).
+
+---
+
+## Optional filters and the AND/OR combiner
+
+The **base screen** (old 52-week high + 1–10% pullback) always applies. On top of it
+there are three **opt-in** filters under *Advanced filters*, all off by default:
+
+- **Volume** — keep stocks above/below a 20-day avg volume threshold.
+- **Futures-enabled (F&O) only** — keep only stocks with derivatives.
+- **Upper circuit = 20% only** — keep only stocks whose daily price band is 20%.
+  *(Disabled until the nightly band feed is configured — see below.)*
+
+Combine them with **AND (match all)** or **OR (match any)**. With a single filter the
+two are identical, so any filter also works standalone.
+
+> ⚠️ **F&O** AND **Band = 20%** returns 0 — F&O stocks have no price band. The app
+> nudges you upfront; use **OR**, or pick one. (Under OR it's a valid union.)
+
+Refresh the F&O list occasionally (changes ~monthly), from an India IP:
+```bash
+python update_fo_list.py     # rewrites data/fo_stocks.csv; then git add/commit/push
+```
+
+---
+
+## Activating the price-band feed (Angel One SmartAPI)
+
+The **Band = 20%** filter reads `data/price_bands.csv`, produced nightly by
+`.github/workflows/update-bands.yml` via Angel One SmartAPI (exact upper/lower
+circuit per symbol — an authenticated API, so it runs from GitHub's cloud, no Mac,
+no NSE IP-block). Until it's configured the band filter shows "pending".
+
+To turn it on, add these **repo secrets** (Settings ▸ Secrets and variables ▸ Actions):
+
+| Secret | Value |
+|---|---|
+| `ANGEL_API_KEY` | your SmartAPI app key |
+| `ANGEL_CLIENT_CODE` | Angel client/login id |
+| `ANGEL_PIN` | login PIN |
+| `ANGEL_TOTP_SECRET` | the base32 TOTP secret (not a live 6-digit code) |
+
+The job runs 19:00 IST on weekdays (or **Run workflow** manually), writes the CSV,
+commits it, and the app redeploys with fresh bands. Without the secrets it no-ops.
 
 ---
 

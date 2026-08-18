@@ -1,0 +1,59 @@
+name: update-price-bands
+
+# Nightly per-symbol price-band feed via Angel One SmartAPI.
+# Runs after market close on weekdays (13:30 UTC = 19:00 IST), writes
+# data/price_bands.csv, and commits it so Streamlit redeploys with fresh bands.
+#
+# Dormant until these repo secrets are set:
+#   ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PIN, ANGEL_TOTP_SECRET
+
+on:
+  schedule:
+    - cron: "30 13 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: update-price-bands
+  cancel-in-progress: false
+
+jobs:
+  bands:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install band-job deps
+        run: pip install -r requirements-bands.txt
+
+      - name: Fetch price bands
+        env:
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+        run: |
+          if [ -z "$ANGEL_API_KEY" ]; then
+            echo "Angel secrets not set yet — skipping (band feed stays pending)."
+            exit 0
+          fi
+          python update_price_bands.py
+
+      - name: Commit updated bands
+        run: |
+          if ! git diff --quiet -- data/price_bands.csv 2>/dev/null; then
+            git config user.name  "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add data/price_bands.csv
+            git commit -m "Update price bands ($(date -u +%Y-%m-%d))"
+            git push
+            echo "committed fresh bands"
+          else
+            echo "no band changes to commit"
+          fi

@@ -1,0 +1,5 @@
+# Deps for the nightly price-band job only (NOT installed by the Streamlit app).
+smartapi-python
+pyotp
+requests
+pandas

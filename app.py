@@ -77,7 +77,8 @@ require_passcode()
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def run_screen(trade_date: str, basis: str, min_days: int,
-               band_low: float, band_high: float, vol_threshold, vol_keep: str):
+               band_low: float, band_high: float, vol_threshold, vol_keep: str,
+               fno_only: bool, band20_only: bool, combine: str):
     universe = screener.load_universe()
     bar = st.progress(0.0, text="Fetching prices from Yahoo Finance…")
 
@@ -88,6 +89,7 @@ def run_screen(trade_date: str, basis: str, min_days: int,
         universe, basis=basis, min_days=min_days,
         band_low=band_low, band_high=band_high,
         vol_threshold=vol_threshold, vol_keep=vol_keep,
+        fno_only=fno_only, band20_only=band20_only, combine=combine,
         progress_cb=_cb,
     )
     bar.empty()
@@ -166,6 +168,40 @@ with st.sidebar:
             help="The volume cutoff; direction above decides keep ≥ or keep ≤.",
         )
 
+        st.divider()
+        # --- F&O filter ---
+        fno_only = st.checkbox(
+            "Futures-enabled (F&O) only",
+            value=False,
+            help="Keep only stocks that have futures/options contracts.",
+        )
+        # --- Upper-circuit 20% filter (needs the nightly band feed) ---
+        has_band, band_as_of = screener.band_feed_status()
+        band_help = ("Keep only stocks whose daily price band is 20%."
+                     if has_band else
+                     "Disabled — the nightly price-band feed hasn't produced data "
+                     "yet (add the Angel SmartAPI secrets to activate it).")
+        band20_only = st.checkbox(
+            "Upper circuit = 20% only",
+            value=False,
+            disabled=not has_band,
+            help=band_help,
+        )
+        if not has_band:
+            st.caption("ℹ️ Band filter pending: broker feed not configured yet.")
+        elif band_as_of:
+            st.caption(f"Band data as of {band_as_of}")
+
+        # --- combine the optional filters ---
+        combine_label = st.radio(
+            "Combine optional filters using",
+            ["AND (match all)", "OR (match any)"],
+            index=0,
+            help="Applies to the Volume / F&O / Band filters above. The base "
+                 "52-week-high + pullback screen always applies.",
+        )
+        combine = "OR" if combine_label.startswith("OR") else "AND"
+
     run = st.button("▶ Run screener", type="primary", use_container_width=True)
     if st.button("↻ Refresh data (clear cache)", use_container_width=True):
         st.cache_data.clear()
@@ -176,13 +212,23 @@ with st.sidebar:
         st.session_state.auth_ok = False
         st.rerun()
 
+# Upfront nudge: F&O ∧ Band=20% under AND can never both be true (F&O = no band).
+mutually_exclusive = fno_only and band20_only and combine == "AND"
+if mutually_exclusive:
+    st.warning(
+        "⚠️ **'Futures-enabled' AND 'Upper circuit = 20%' will return 0 results.** "
+        "F&O stocks have no price band, so no stock is both. "
+        "Switch the combiner to **OR**, or deselect one of the two."
+    )
+
 if run or st.session_state.get("has_run"):
     st.session_state.has_run = True
     trade_date = datetime.now(IST).strftime("%Y-%m-%d")
     vt = int(vol_threshold) if use_vol_filter else None
     with st.spinner("Running screener…"):
         results, stats = run_screen(trade_date, basis, int(min_days),
-                                    float(band_low), float(band_high), vt, vol_keep)
+                                    float(band_low), float(band_high), vt, vol_keep,
+                                    fno_only, band20_only, combine)
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Universe", stats["universe"])
@@ -190,14 +236,19 @@ if run or st.session_state.get("has_run"):
     c3.metric("Matches", stats["matched"])
     c4.metric("As of", stats["as_of"] or "—")
 
+    opt = []
     if vt:
         _op = "≥" if vol_keep == "above" else "≤"
-        vol_txt = f"avg vol **{_op} {vt:,}**"
-    else:
-        vol_txt = "volume filter **off**"
+        opt.append(f"avg vol {_op} {vt:,}")
+    if fno_only:
+        opt.append("F&O only")
+    if band20_only:
+        opt.append("band = 20%")
+    opt_txt = (f"optional: **{f' {combine} '.join(opt)}**" if opt
+               else "optional filters **off**")
     st.caption(
         f"Basis: **{basis_label}**  •  high older than **{int(min_days)}d**  •  "
-        f"pullback **{band_low:g}–{band_high:g}%**  •  {vol_txt}  •  "
+        f"pullback **{band_low:g}–{band_high:g}%**  •  {opt_txt}  •  "
         f"no data: {stats['skipped_no_data']}, short history: "
         f"{stats['skipped_short_history']}"
     )
