@@ -17,7 +17,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
-import screener
+import nse_screener as screener   # unique module name avoids stale-cache / name clashes
 
 IST = ZoneInfo("Asia/Kolkata")
 
