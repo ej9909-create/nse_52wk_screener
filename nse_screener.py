@@ -33,6 +33,7 @@ LOOKBACK_WINDOW_DAYS = 365      # "52 weeks" for the high computation
 FETCH_DAYS = 420                # calendar days of history to pull (buffer > 365)
 MIN_TRADING_DAYS = 200          # skip stocks with too little history for a 52wk high
 BATCH_SIZE = 50                 # tickers per yfinance download call (smaller = lower peak RAM)
+DOWNLOAD_THREADS = 6            # bounded yfinance workers (free host has a low thread ceiling)
 AVG_VOL_DAYS = 20               # window for the average-volume column
 SPLIT_JUMP_PCT = 35.0           # flag a likely split/bonus if a 1-day move exceeds this
 
@@ -162,7 +163,7 @@ def _download_batch(tickers: list[str], start, retries: int = 2) -> pd.DataFrame
                 interval="1d",
                 auto_adjust=False,      # match NSE's displayed (unadjusted) 52wk high
                 group_by="ticker",
-                threads=True,
+                threads=DOWNLOAD_THREADS,   # bounded — avoid exhausting the host thread limit
                 progress=False,
             )
             if data is not None and not data.empty:

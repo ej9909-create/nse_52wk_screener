@@ -4,3 +4,14 @@ primaryColor = "#1f6feb"
 
 [server]
 headless = true
+# No file-watching on Streamlit Cloud (it redeploys via git). The watchdog
+# observer spawns threads that exhaust the free container's thread limit
+# ("RuntimeError: can't start new thread"), so turn it off.
+fileWatcherType = "none"
+
+[runner]
+# Don't gather usage stats on a background thread either.
+fastReruns = true
+
+[browser]
+gatherUsageStats = false
