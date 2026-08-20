@@ -77,8 +77,9 @@ require_passcode()
 # ----------------------------------------------------------------------------
 @st.cache_data(ttl=12 * 3600, show_spinner=False)
 def run_screen(trade_date: str, basis: str, min_days: int,
-               band_low: float, band_high: float, vol_threshold, vol_keep: str,
-               fno_only: bool, band20_only: bool, combine: str):
+               band_low: float, band_high: float,
+               fno_only: bool, qty_circuit_only: bool, qty_threshold, qty_keep: str,
+               listing_only: bool, listing_min_months: int, listing_max_months: int):
     universe = screener.load_universe()
     bar = st.progress(0.0, text="Fetching prices from Yahoo Finance…")
 
@@ -88,8 +89,10 @@ def run_screen(trade_date: str, basis: str, min_days: int,
     results, stats = screener.fetch_and_screen(
         universe, basis=basis, min_days=min_days,
         band_low=band_low, band_high=band_high,
-        vol_threshold=vol_threshold, vol_keep=vol_keep,
-        fno_only=fno_only, band20_only=band20_only, combine=combine,
+        fno_only=fno_only, qty_circuit_only=qty_circuit_only,
+        qty_threshold=qty_threshold, qty_keep=qty_keep,
+        listing_only=listing_only,
+        listing_min_months=listing_min_months, listing_max_months=listing_max_months,
         progress_cb=_cb,
     )
     bar.empty()
@@ -145,62 +148,66 @@ with st.sidebar:
             help="Keep stocks whose close is this % below the 52-week high.",
         )
 
-        use_vol_filter = st.checkbox(
-            "Apply volume filter",
-            value=False,
-            help="Off by default. When on, filter stocks by 20-day average "
-                 "daily volume using the direction and threshold below.",
-        )
-        vol_dir_label = st.radio(
-            "Volume filter direction",
-            ["Above threshold (exclude low-volume)",
-             "Below threshold (exclude high-volume)"],
-            index=0,
-            disabled=not use_vol_filter,
-            help="Above: keep only liquid stocks (avg vol ≥ threshold). "
-                 "Below: keep only thin stocks (avg vol ≤ threshold).",
-        )
-        vol_keep = "above" if vol_dir_label.startswith("Above") else "below"
-        vol_threshold = st.number_input(
-            "20-day avg daily volume threshold",
-            min_value=0, value=screener.DEFAULT_MIN_AVG_VOL, step=5000,
-            disabled=not use_vol_filter,
-            help="The volume cutoff; direction above decides keep ≥ or keep ≤.",
-        )
-
         st.divider()
-        # --- F&O filter ---
+        st.caption("Optional filters — each is off by default; enabled ones all "
+                   "apply together (AND). The base screen above always applies.")
+
+        # --- Filter 1: F&O only ---
         fno_only = st.checkbox(
-            "Futures-enabled (F&O) only",
+            "1 · Futures-enabled (F&O) only",
             value=False,
             help="Keep only stocks that have futures/options contracts.",
         )
-        # --- Upper-circuit 20% filter (needs the nightly band feed) ---
+
+        # --- Filter 2: Qty + Upper circuit (both required) ---
         has_band, band_as_of = screener.band_feed_status()
-        band_help = ("Keep only stocks whose daily price band is 20%."
-                     if has_band else
-                     "Disabled — the nightly price-band feed hasn't produced data "
-                     "yet (add the Angel SmartAPI secrets to activate it).")
-        band20_only = st.checkbox(
-            "Upper circuit = 20% only",
+        f2_help = ("Keep stocks whose avg 20-day volume passes the threshold "
+                   "(direction below) AND whose daily price band is 20%."
+                   if has_band else
+                   "Disabled — needs the nightly price-band feed (Angel SmartAPI).")
+        qty_circuit_only = st.checkbox(
+            "2 · Qty + Upper circuit (20%)",
             value=False,
             disabled=not has_band,
-            help=band_help,
+            help=f2_help,
+        )
+        qty_dir_label = st.radio(
+            "Qty direction",
+            ["Above threshold (liquid)", "Below threshold (thin)"],
+            index=0,
+            disabled=not (has_band and qty_circuit_only),
+            help="Above: avg vol ≥ threshold. Below: avg vol ≤ threshold. "
+                 "Combined with band = 20%.",
+        )
+        qty_keep = "above" if qty_dir_label.startswith("Above") else "below"
+        qty_threshold = st.number_input(
+            "Qty threshold (20-day avg volume)",
+            min_value=0, value=screener.DEFAULT_MIN_AVG_VOL, step=5000,
+            disabled=not (has_band and qty_circuit_only),
         )
         if not has_band:
-            st.caption("ℹ️ Band filter pending: broker feed not configured yet.")
+            st.caption("ℹ️ Filter 2 pending: broker band feed not configured yet.")
         elif band_as_of:
             st.caption(f"Band data as of {band_as_of}")
 
-        # --- combine the optional filters ---
-        combine_label = st.radio(
-            "Combine optional filters using",
-            ["AND (match all)", "OR (match any)"],
-            index=0,
-            help="Applies to the Volume / F&O / Band filters above. The base "
-                 "52-week-high + pullback screen always applies.",
+        # --- Filter 3: Listing window ---
+        listing_only = st.checkbox(
+            "3 · Listing window",
+            value=False,
+            help="Keep stocks listed between the two ages below (months since "
+                 "NSE listing).",
         )
-        combine = "OR" if combine_label.startswith("OR") else "AND"
+        lc1, lc2 = st.columns(2)
+        listing_min_months = lc1.number_input(
+            "Listed ≥ (months)", min_value=0, max_value=600,
+            value=screener.DEFAULT_LISTING_MIN_MONTHS, step=1,
+            disabled=not listing_only, help="Minimum age since listing.",
+        )
+        listing_max_months = lc2.number_input(
+            "Listed ≤ (months)", min_value=1, max_value=600,
+            value=screener.DEFAULT_LISTING_MAX_MONTHS, step=1,
+            disabled=not listing_only, help="Maximum age since listing.",
+        )
 
     run = st.button("▶ Run screener", type="primary", use_container_width=True)
     if st.button("↻ Refresh data (clear cache)", use_container_width=True):
@@ -212,23 +219,24 @@ with st.sidebar:
         st.session_state.auth_ok = False
         st.rerun()
 
-# Upfront nudge: F&O ∧ Band=20% under AND can never both be true (F&O = no band).
-mutually_exclusive = fno_only and band20_only and combine == "AND"
-if mutually_exclusive:
+# Upfront nudge: F&O (Filter 1) + Qty+Circuit (Filter 2) can never both be true —
+# F&O stocks have no price band, so band=20% is impossible for them.
+if fno_only and qty_circuit_only:
     st.warning(
-        "⚠️ **'Futures-enabled' AND 'Upper circuit = 20%' will return 0 results.** "
-        "F&O stocks have no price band, so no stock is both. "
-        "Switch the combiner to **OR**, or deselect one of the two."
+        "⚠️ **Filter 1 (F&O) + Filter 2 (Qty + Upper circuit) will return 0 results.** "
+        "F&O stocks have no price band, so none can have a 20% band. "
+        "Use just one of the two."
     )
 
 if run or st.session_state.get("has_run"):
     st.session_state.has_run = True
     trade_date = datetime.now(IST).strftime("%Y-%m-%d")
-    vt = int(vol_threshold) if use_vol_filter else None
     with st.spinner("Running screener…"):
-        results, stats = run_screen(trade_date, basis, int(min_days),
-                                    float(band_low), float(band_high), vt, vol_keep,
-                                    fno_only, band20_only, combine)
+        results, stats = run_screen(
+            trade_date, basis, int(min_days), float(band_low), float(band_high),
+            fno_only, qty_circuit_only, int(qty_threshold), qty_keep,
+            listing_only, int(listing_min_months), int(listing_max_months),
+        )
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Universe", stats["universe"])
@@ -237,14 +245,14 @@ if run or st.session_state.get("has_run"):
     c4.metric("As of", stats["as_of"] or "—")
 
     opt = []
-    if vt:
-        _op = "≥" if vol_keep == "above" else "≤"
-        opt.append(f"avg vol {_op} {vt:,}")
     if fno_only:
         opt.append("F&O only")
-    if band20_only:
-        opt.append("band = 20%")
-    opt_txt = (f"optional: **{f' {combine} '.join(opt)}**" if opt
+    if qty_circuit_only:
+        _op = "≥" if qty_keep == "above" else "≤"
+        opt.append(f"qty {_op} {int(qty_threshold):,} + band 20%")
+    if listing_only:
+        opt.append(f"listed {int(listing_min_months)}–{int(listing_max_months)}mo ago")
+    opt_txt = (f"filters: **{'  AND  '.join(opt)}**" if opt
                else "optional filters **off**")
     st.caption(
         f"Basis: **{basis_label}**  •  high older than **{int(min_days)}d**  •  "

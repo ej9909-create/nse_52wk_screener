@@ -40,15 +40,17 @@ SPLIT_JUMP_PCT = 35.0           # flag a likely split/bonus if a 1-day move exce
 DEFAULT_MIN_DAYS = 90           # "3 months"
 DEFAULT_BAND_LOW = 1.0          # % below high (min pullback)
 DEFAULT_BAND_HIGH = 10.0        # % below high (max pullback)
-DEFAULT_MIN_AVG_VOL = 30000     # min 20-day avg daily volume when the filter is ON
+DEFAULT_MIN_AVG_VOL = 30000     # avg 20-day volume threshold for the Qty+Circuit filter
 CIRCUIT_BAND_PCT = 20           # the "upper circuit = 20%" filter target
+DEFAULT_LISTING_MIN_MONTHS = 3  # listing-window filter: youngest age (months since listing)
+DEFAULT_LISTING_MAX_MONTHS = 12 # listing-window filter: oldest age
 
 FO_PATH = "data/fo_stocks.csv"        # bundled F&O underlyings list
 BANDS_PATH = "data/price_bands.csv"   # nightly per-symbol price bands (broker feed)
 
 RESULT_COLUMNS = [
     "Symbol", "Company", "LastClose", "52wHigh", "HighDate",
-    "DaysSinceHigh", "PctFromHigh", "AvgVol20d", "F&O", "Band%", "Basis",
+    "DaysSinceHigh", "PctFromHigh", "AvgVol20d", "F&O", "Band%", "ListingDate", "Basis",
 ]
 
 
@@ -86,6 +88,15 @@ def load_universe(
     df = df[df["Symbol"] != ""].drop_duplicates(subset="Symbol").reset_index(drop=True)
     df["Ticker"] = df["Symbol"] + ".NS"
 
+    # Listing date (powers the listing-window filter; format like 08-JUL-1999)
+    if "DATE OF LISTING" in df.columns:
+        df["ListingDate"] = pd.to_datetime(
+            df["DATE OF LISTING"].astype(str).str.strip(),
+            format="%d-%b-%Y", errors="coerce",
+        )
+    else:
+        df["ListingDate"] = pd.NaT
+
     # F&O flag
     fno_set = _load_fno_set(fo_path)
     df["is_fno"] = df["Symbol"].isin(fno_set)
@@ -96,7 +107,7 @@ def load_universe(
 
     df.attrs["band_as_of"] = band_as_of
     df.attrs["has_band_data"] = bool(band_map)
-    return df[["Symbol", "Company", "Ticker", "is_fno", "Band"]]
+    return df[["Symbol", "Company", "Ticker", "is_fno", "Band", "ListingDate"]]
 
 
 def _load_fno_set(fo_path: str) -> set[str]:
@@ -255,30 +266,32 @@ def fetch_and_screen(
     min_days: int = DEFAULT_MIN_DAYS,
     band_low: float = DEFAULT_BAND_LOW,
     band_high: float = DEFAULT_BAND_HIGH,
-    vol_threshold: float | None = None,
-    vol_keep: str = "above",
     fno_only: bool = False,
-    band20_only: bool = False,
-    combine: str = "AND",
+    qty_circuit_only: bool = False,
+    qty_threshold: float = DEFAULT_MIN_AVG_VOL,
+    qty_keep: str = "above",
+    listing_only: bool = False,
+    listing_min_months: int = DEFAULT_LISTING_MIN_MONTHS,
+    listing_max_months: int = DEFAULT_LISTING_MAX_MONTHS,
     progress_cb=None,
 ) -> tuple[pd.DataFrame, ScreenStats]:
     """
     Download prices for the whole universe and apply the filters.
 
     The BASE screen (old 52-week high + shallow pullback) is ALWAYS applied.
-    On top of it, up to three OPTIONAL filters are combined by `combine`:
-      - volume  (enabled when vol_threshold is not None; direction via vol_keep)
-      - F&O     (enabled when fno_only=True)   -> stock has futures/options
-      - band20  (enabled when band20_only=True) -> daily price band == 20%
-    `combine` = "AND" (a stock must pass every enabled optional filter) or
-    "OR" (must pass at least one). With one optional filter the two are identical.
+    On top of it, up to three OPTIONAL filters are AND-combined (a stock must
+    pass every one that is enabled):
+      1. F&O          (fno_only)          -> stock has futures/options
+      2. Qty+Circuit  (qty_circuit_only)  -> avg vol vs qty_threshold (direction
+                                             qty_keep) AND daily price band == 20%
+      3. Listing      (listing_only)      -> listed between listing_min_months and
+                                             listing_max_months ago
     With no optional filter enabled, only the base screen applies.
 
     Returns (results_df, stats). `progress_cb(done, total)` is called after each
     batch so the UI can render a progress bar.
     """
     basis = "high" if str(basis).lower().startswith("h") else "close"
-    combine = "OR" if str(combine).upper() == "OR" else "AND"
     stats = ScreenStats(universe=len(universe))
     start = (datetime.now() - timedelta(days=FETCH_DAYS)).date()
 
@@ -286,7 +299,13 @@ def fetch_and_screen(
     name_by_ticker = dict(zip(universe["Ticker"], universe["Company"]))
     fno_by_sym = dict(zip(universe["Symbol"], universe.get("is_fno", False)))
     band_by_sym = dict(zip(universe["Symbol"], universe.get("Band", float("nan"))))
+    listing_by_sym = dict(zip(universe["Symbol"], universe.get("ListingDate", pd.NaT)))
     tickers = list(universe["Ticker"])
+
+    # listing-window bounds: keep stocks listed between max and min months ago
+    _today = pd.Timestamp.now().normalize()
+    listing_newest = _today - pd.DateOffset(months=int(listing_min_months))  # not too new
+    listing_oldest = _today - pd.DateOffset(months=int(listing_max_months))  # not too old
 
     rows: list[dict] = []
     latest_seen = None
@@ -323,21 +342,22 @@ def fetch_and_screen(
                 if not (band_low <= metrics["PctFromHigh"] <= band_high):
                     continue
 
-                # OPTIONAL filters — combined by AND/OR
+                # OPTIONAL filters — every enabled one must pass (AND)
                 is_fno = bool(fno_by_sym.get(sym, False))
                 band_num = _band_num(band_by_sym.get(sym))
-                passes: list[bool] = []
-                if vol_threshold is not None:
+                listing_date = listing_by_sym.get(sym)
+
+                if fno_only and not is_fno:
+                    continue
+                if qty_circuit_only:
                     v = metrics["AvgVol20d"]
-                    passes.append(v <= vol_threshold if vol_keep == "below"
-                                  else v >= vol_threshold)
-                if fno_only:
-                    passes.append(is_fno)
-                if band20_only:
-                    passes.append(band_num == CIRCUIT_BAND_PCT)
-                if passes:
-                    ok = all(passes) if combine == "AND" else any(passes)
-                    if not ok:
+                    qty_ok = v <= qty_threshold if qty_keep == "below" else v >= qty_threshold
+                    if not (qty_ok and band_num == CIRCUIT_BAND_PCT):
+                        continue
+                if listing_only:
+                    if listing_date is None or pd.isna(listing_date):
+                        continue
+                    if not (listing_oldest <= listing_date <= listing_newest):
                         continue
 
                 if band_num is not None:
@@ -346,6 +366,9 @@ def fetch_and_screen(
                     band_disp = "NB"       # F&O stocks have no price band
                 else:
                     band_disp = "—"
+                listing_disp = (listing_date.date().isoformat()
+                                if listing_date is not None and not pd.isna(listing_date)
+                                else "—")
                 rows.append({
                     "Symbol": sym,
                     "Company": name_by_ticker[t],
@@ -357,6 +380,7 @@ def fetch_and_screen(
                     "AvgVol20d": metrics["AvgVol20d"],
                     "F&O": "Yes" if is_fno else "No",
                     "Band%": band_disp,
+                    "ListingDate": listing_disp,
                     "Basis": "Intraday High" if basis == "high" else "Daily Close",
                 })
         # release this batch's raw frame before fetching the next one

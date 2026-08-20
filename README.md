@@ -27,27 +27,29 @@ with your group.
 | `AvgVol20d` | Average daily volume over the last 20 sessions (shown always; optionally filtered) |
 | `F&O` | Whether the stock has futures/options (Yes/No; shown always, optionally filtered) |
 | `Band%` | Daily price band (20 / 10 / 5 / 2, `NB` = no band for F&O, `—` = unknown) |
+| `ListingDate` | NSE listing date (`—` if unknown) |
 | `Basis` | Whether the high used Intraday High or Daily Close |
 
 Results are sorted by `PctFromHigh` ascending (closest to the high first).
 
 ---
 
-## Optional filters and the AND/OR combiner
+## Optional filters
 
 The **base screen** (old 52-week high + 1–10% pullback) always applies. On top of it
-there are three **opt-in** filters under *Advanced filters*, all off by default:
+there are three **opt-in** filters under *Advanced filters*, all off by default.
+**Whatever you enable is applied together (AND)** — there is no AND/OR selector.
 
-- **Volume** — keep stocks above/below a 20-day avg volume threshold.
-- **Futures-enabled (F&O) only** — keep only stocks with derivatives.
-- **Upper circuit = 20% only** — keep only stocks whose daily price band is 20%.
-  *(Disabled until the nightly band feed is configured — see below.)*
+1. **Futures-enabled (F&O) only** — keep only stocks with derivatives.
+2. **Qty + Upper circuit (20%)** — keep stocks whose 20-day avg volume is
+   above/below a threshold (direction selectable) **AND** whose daily price band
+   is 20%. *(Disabled until the nightly band feed is configured — see below.)*
+3. **Listing window** — keep stocks listed between a min and max age (months since
+   NSE listing; default **3–12 months**, both adjustable).
 
-Combine them with **AND (match all)** or **OR (match any)**. With a single filter the
-two are identical, so any filter also works standalone.
-
-> ⚠️ **F&O** AND **Band = 20%** returns 0 — F&O stocks have no price band. The app
-> nudges you upfront; use **OR**, or pick one. (Under OR it's a valid union.)
+> ⚠️ Filter 1 (**F&O**) + Filter 2 (**Qty + Upper circuit**) together returns 0 —
+> F&O stocks have no price band, so none can be at 20%. The app nudges you upfront;
+> use just one of the two.
 
 Refresh the F&O list occasionally (changes ~monthly), from an India IP:
 ```bash

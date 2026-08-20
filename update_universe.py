@@ -44,8 +44,12 @@ def fetch() -> pd.DataFrame:
     # main-board tradable equity series
     df = df[df["SERIES"].isin(["EQ", "BE"])].copy()
     df["SYMBOL"] = df["SYMBOL"].astype(str).str.strip()
-    df = df.rename(columns={"NAME OF COMPANY": "NAME OF COMPANY"})
-    out = df[["SYMBOL", "NAME OF COMPANY", "SERIES"]].drop_duplicates("SYMBOL")
+    cols = ["SYMBOL", "NAME OF COMPANY", "SERIES"]
+    # DATE OF LISTING powers the listing-window filter (format like 08-JUL-1999)
+    if "DATE OF LISTING" in df.columns:
+        df["DATE OF LISTING"] = df["DATE OF LISTING"].astype(str).str.strip()
+        cols.append("DATE OF LISTING")
+    out = df[cols].drop_duplicates("SYMBOL")
     return out.reset_index(drop=True)
 
 
