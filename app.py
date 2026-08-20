@@ -18,6 +18,7 @@ for _v in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
            "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
     os.environ.setdefault(_v, "1")
 
+import importlib
 import io
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -25,7 +26,14 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import streamlit as st
 
-import nse_screener as screener   # unique module name avoids stale-cache / name clashes
+# Force-reload the local module every run. The file-watcher is off (to keep the
+# thread count low on the free host), so Streamlit would otherwise hot-rerun this
+# script against a STALE cached nse_screener after a redeploy — causing
+# "AttributeError: module 'nse_screener' has no attribute ..." on new functions.
+# reload() re-reads the current source from disk; cheap since the app is light.
+import nse_screener
+importlib.reload(nse_screener)
+screener = nse_screener
 
 IST = ZoneInfo("Asia/Kolkata")
 
