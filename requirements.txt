@@ -1,4 +1,6 @@
-streamlit>=1.40
+# Pinned upper bounds so a redeploy can't silently jump to an untested Streamlit
+# build (a 1.61->1.62 auto-bump previously destabilized the app).
+streamlit>=1.40,<1.63
 yfinance>=0.2.50
 pandas>=2.1
 requests>=2.31
