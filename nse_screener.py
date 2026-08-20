@@ -47,6 +47,12 @@ DEFAULT_LISTING_MAX_MONTHS = 12 # listing-window filter: oldest age
 
 FO_PATH = "data/fo_stocks.csv"        # bundled F&O underlyings list
 BANDS_PATH = "data/price_bands.csv"   # nightly per-symbol price bands (broker feed)
+SNAPSHOT_PATH = "data/screener_snapshot.csv"  # nightly precomputed base metrics
+
+SNAPSHOT_COLUMNS = [
+    "Symbol", "Company", "LastClose", "HighH", "HighHDate", "HighC", "HighCDate",
+    "AvgVol20d", "is_fno", "Band", "ListingDate", "LastDate",
+]
 
 RESULT_COLUMNS = [
     "Symbol", "Company", "LastClose", "52wHigh", "HighDate",
@@ -213,8 +219,11 @@ def _extract_one(data: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
 # ----------------------------------------------------------------------------
 # Per-stock computation
 # ----------------------------------------------------------------------------
-def _evaluate(sub: pd.DataFrame, basis: str) -> dict | None:
-    """Compute 52wk metrics for one stock. Returns a metrics dict or None if unusable."""
+def _evaluate_both(sub: pd.DataFrame) -> dict | None:
+    """
+    Compute 52-week metrics for BOTH bases (intraday High and daily Close) for one
+    stock. Returns a snapshot dict, {"_short_history": True}, or None if unusable.
+    """
     sub = sub.sort_index()
     close = sub["Close"].dropna()
     if close.empty:
@@ -226,72 +235,47 @@ def _evaluate(sub: pd.DataFrame, basis: str) -> dict | None:
     if len(window) < MIN_TRADING_DAYS:
         return {"_short_history": True}
 
-    price = window["High"] if basis == "high" else window["Close"]
-    price = price.dropna()
-    if price.empty:
-        return None
-
-    high_52w = float(price.max())
-    if high_52w <= 0:
-        return None
-    # most-RECENT date the high was touched (strict about "no recent cross")
-    high_date = price[price == high_52w].index.max()
-
     last_close = float(window["Close"].dropna().iloc[-1])
-    days_since_high = int((last_date - high_date).days)
-    pct_from_high = (high_52w - last_close) / high_52w * 100.0
+
+    def _high(series):
+        s = series.dropna()
+        if s.empty:
+            return None, None
+        hi = float(s.max())
+        if hi <= 0:
+            return None, None
+        hd = s[s == hi].index.max()   # most-recent touch of the high
+        return round(hi, 2), hd.date().isoformat()
+
+    high_h, date_h = _high(window["High"])
+    high_c, date_c = _high(window["Close"])
+    if high_h is None and high_c is None:
+        return None
 
     vol = window["Volume"].dropna()
-    avg_vol = float(vol.tail(AVG_VOL_DAYS).mean()) if not vol.empty else 0.0
+    avg_vol = int(vol.tail(AVG_VOL_DAYS).mean()) if not vol.empty else 0
 
-    # likely split/bonus flag (unadjusted data): a huge single-day close move
     daily_ret = window["Close"].pct_change().abs()
     split_flag = bool((daily_ret > SPLIT_JUMP_PCT / 100.0).any())
 
     return {
         "LastClose": round(last_close, 2),
-        "52wHigh": round(high_52w, 2),
-        "HighDate": high_date.date().isoformat(),
-        "DaysSinceHigh": days_since_high,
-        "PctFromHigh": round(pct_from_high, 2),
-        "AvgVol20d": int(avg_vol),
+        "HighH": high_h, "HighHDate": date_h,
+        "HighC": high_c, "HighCDate": date_c,
+        "AvgVol20d": avg_vol,
         "_last_date": last_date,
         "_split_flag": split_flag,
     }
 
 
-def fetch_and_screen(
-    universe: pd.DataFrame,
-    basis: str = "high",
-    min_days: int = DEFAULT_MIN_DAYS,
-    band_low: float = DEFAULT_BAND_LOW,
-    band_high: float = DEFAULT_BAND_HIGH,
-    fno_only: bool = False,
-    qty_circuit_only: bool = False,
-    qty_threshold: float = DEFAULT_MIN_AVG_VOL,
-    qty_keep: str = "above",
-    listing_only: bool = False,
-    listing_min_months: int = DEFAULT_LISTING_MIN_MONTHS,
-    listing_max_months: int = DEFAULT_LISTING_MAX_MONTHS,
-    progress_cb=None,
-) -> tuple[pd.DataFrame, ScreenStats]:
+def compute_snapshot(universe: pd.DataFrame, progress_cb=None):
     """
-    Download prices for the whole universe and apply the filters.
+    HEAVY step — run in the scheduled snapshot job, NOT the web app.
 
-    The BASE screen (old 52-week high + shallow pullback) is ALWAYS applied.
-    On top of it, up to three OPTIONAL filters are AND-combined (a stock must
-    pass every one that is enabled):
-      1. F&O          (fno_only)          -> stock has futures/options
-      2. Qty+Circuit  (qty_circuit_only)  -> avg vol vs qty_threshold (direction
-                                             qty_keep) AND daily price band == 20%
-      3. Listing      (listing_only)      -> listed between listing_min_months and
-                                             listing_max_months ago
-    With no optional filter enabled, only the base screen applies.
-
-    Returns (results_df, stats). `progress_cb(done, total)` is called after each
-    batch so the UI can render a progress bar.
+    Downloads prices for the whole universe and computes per-stock base metrics
+    for BOTH bases (intraday High and daily Close) plus F&O / band / listing. No
+    filtering. Returns (snapshot_df, stats) with columns == SNAPSHOT_COLUMNS.
     """
-    basis = "high" if str(basis).lower().startswith("h") else "close"
     stats = ScreenStats(universe=len(universe))
     start = (datetime.now() - timedelta(days=FETCH_DAYS)).date()
 
@@ -301,11 +285,6 @@ def fetch_and_screen(
     band_by_sym = dict(zip(universe["Symbol"], universe.get("Band", float("nan"))))
     listing_by_sym = dict(zip(universe["Symbol"], universe.get("ListingDate", pd.NaT)))
     tickers = list(universe["Ticker"])
-
-    # listing-window bounds: keep stocks listed between max and min months ago
-    _today = pd.Timestamp.now().normalize()
-    listing_newest = _today - pd.DateOffset(months=int(listing_min_months))  # not too new
-    listing_oldest = _today - pd.DateOffset(months=int(listing_max_months))  # not too old
 
     rows: list[dict] = []
     latest_seen = None
@@ -323,67 +302,33 @@ def fetch_and_screen(
                 if sub is None:
                     stats.skipped_no_data.append(sym)
                     continue
-                metrics = _evaluate(sub, basis)
-                if metrics is None:
+                m = _evaluate_both(sub)
+                if m is None:
                     stats.skipped_no_data.append(sym)
                     continue
-                if metrics.get("_short_history"):
+                if m.get("_short_history"):
                     stats.skipped_short_history.append(sym)
                     continue
                 stats.fetched += 1
-                if metrics["_split_flag"]:
+                if m["_split_flag"]:
                     stats.split_warnings.append(sym)
-                ld = metrics["_last_date"]
+                ld = m["_last_date"]
                 if latest_seen is None or ld > latest_seen:
                     latest_seen = ld
-                # BASE screen — always applied
-                if metrics["DaysSinceHigh"] <= min_days:
-                    continue
-                if not (band_low <= metrics["PctFromHigh"] <= band_high):
-                    continue
-
-                # OPTIONAL filters — every enabled one must pass (AND)
-                is_fno = bool(fno_by_sym.get(sym, False))
-                band_num = _band_num(band_by_sym.get(sym))
-                listing_date = listing_by_sym.get(sym)
-
-                if fno_only and not is_fno:
-                    continue
-                if qty_circuit_only:
-                    v = metrics["AvgVol20d"]
-                    qty_ok = v <= qty_threshold if qty_keep == "below" else v >= qty_threshold
-                    if not (qty_ok and band_num == CIRCUIT_BAND_PCT):
-                        continue
-                if listing_only:
-                    if listing_date is None or pd.isna(listing_date):
-                        continue
-                    if not (listing_oldest <= listing_date <= listing_newest):
-                        continue
-
-                if band_num is not None:
-                    band_disp = band_num
-                elif is_fno:
-                    band_disp = "NB"       # F&O stocks have no price band
-                else:
-                    band_disp = "—"
-                listing_disp = (listing_date.date().isoformat()
-                                if listing_date is not None and not pd.isna(listing_date)
-                                else "—")
+                listing = listing_by_sym.get(sym)
                 rows.append({
                     "Symbol": sym,
                     "Company": name_by_ticker[t],
-                    "LastClose": metrics["LastClose"],
-                    "52wHigh": metrics["52wHigh"],
-                    "HighDate": metrics["HighDate"],
-                    "DaysSinceHigh": metrics["DaysSinceHigh"],
-                    "PctFromHigh": metrics["PctFromHigh"],
-                    "AvgVol20d": metrics["AvgVol20d"],
-                    "F&O": "Yes" if is_fno else "No",
-                    "Band%": band_disp,
-                    "ListingDate": listing_disp,
-                    "Basis": "Intraday High" if basis == "high" else "Daily Close",
+                    "LastClose": m["LastClose"],
+                    "HighH": m["HighH"], "HighHDate": m["HighHDate"],
+                    "HighC": m["HighC"], "HighCDate": m["HighCDate"],
+                    "AvgVol20d": m["AvgVol20d"],
+                    "is_fno": bool(fno_by_sym.get(sym, False)),
+                    "Band": band_by_sym.get(sym),
+                    "ListingDate": (listing.date().isoformat()
+                                    if listing is not None and not pd.isna(listing) else ""),
+                    "LastDate": ld.date().isoformat(),
                 })
-        # release this batch's raw frame before fetching the next one
         del data
         gc.collect()
         done += len(batch)
@@ -392,8 +337,114 @@ def fetch_and_screen(
 
     if latest_seen is not None:
         stats.as_of = latest_seen.date().isoformat()
+    snap = pd.DataFrame(rows, columns=SNAPSHOT_COLUMNS)
+    return snap, stats
 
-    results = pd.DataFrame(rows, columns=RESULT_COLUMNS)
-    if not results.empty:
-        results = results.sort_values("PctFromHigh").reset_index(drop=True)
-    return results, stats
+
+def load_snapshot(path: str = SNAPSHOT_PATH) -> pd.DataFrame:
+    """Load the precomputed snapshot (empty df if missing). `df.attrs['as_of']` set."""
+    try:
+        snap = pd.read_csv(path)
+    except Exception:
+        empty = pd.DataFrame(columns=SNAPSHOT_COLUMNS)
+        empty.attrs["as_of"] = None
+        return empty
+    if "is_fno" in snap.columns:
+        snap["is_fno"] = snap["is_fno"].map(
+            lambda x: str(x).strip().lower() in ("true", "1"))
+    as_of = None
+    if "LastDate" in snap.columns and not snap["LastDate"].dropna().empty:
+        as_of = str(snap["LastDate"].dropna().max())
+    snap.attrs["as_of"] = as_of
+    return snap
+
+
+def screen_snapshot(
+    snap: pd.DataFrame,
+    basis: str = "high",
+    min_days: int = DEFAULT_MIN_DAYS,
+    band_low: float = DEFAULT_BAND_LOW,
+    band_high: float = DEFAULT_BAND_HIGH,
+    fno_only: bool = False,
+    qty_circuit_only: bool = False,
+    qty_threshold: float = DEFAULT_MIN_AVG_VOL,
+    qty_keep: str = "above",
+    listing_only: bool = False,
+    listing_min_months: int = DEFAULT_LISTING_MIN_MONTHS,
+    listing_max_months: int = DEFAULT_LISTING_MAX_MONTHS,
+) -> pd.DataFrame:
+    """
+    LIGHT step — the web app runs this. Applies the base screen + optional filters
+    to the precomputed snapshot in memory (no network, no heavy compute).
+
+    Base (always): 52-week high older than `min_days` AND close `band_low`..
+    `band_high`% below it. Optional (AND when enabled): F&O; Qty+Circuit (avg vol
+    vs threshold by direction AND band==20%); Listing window (min..max months).
+    """
+    basis = "high" if str(basis).lower().startswith("h") else "close"
+    if snap is None or snap.empty:
+        return pd.DataFrame(columns=RESULT_COLUMNS)
+
+    df = snap.copy()
+    if "is_fno" in df.columns and df["is_fno"].dtype == object:
+        df["is_fno"] = df["is_fno"].map(lambda x: str(x).strip().lower() in ("true", "1"))
+    as_of = pd.to_datetime(df["LastDate"], errors="coerce").max()
+    hi_col, hd_col = ("HighH", "HighHDate") if basis == "high" else ("HighC", "HighCDate")
+
+    df["_high"] = pd.to_numeric(df[hi_col], errors="coerce")
+    df["_hdate"] = pd.to_datetime(df[hd_col], errors="coerce")
+    df["_close"] = pd.to_numeric(df["LastClose"], errors="coerce")
+    df = df[df["_high"].notna() & (df["_high"] > 0)
+            & df["_hdate"].notna() & df["_close"].notna()].copy()
+    if df.empty:
+        return pd.DataFrame(columns=RESULT_COLUMNS)
+
+    df["_days"] = (as_of - df["_hdate"]).dt.days
+    df["_pct"] = (df["_high"] - df["_close"]) / df["_high"] * 100.0
+
+    # BASE screen (always)
+    df = df[(df["_days"] > min_days)
+            & (df["_pct"] >= band_low) & (df["_pct"] <= band_high)].copy()
+
+    df["_band"] = df["Band"].map(_band_num)
+    df["_vol"] = pd.to_numeric(df["AvgVol20d"], errors="coerce").fillna(0)
+
+    # OPTIONAL filters (AND)
+    if fno_only:
+        df = df[df["is_fno"]]
+    if qty_circuit_only:
+        qmask = (df["_vol"] <= qty_threshold) if qty_keep == "below" \
+            else (df["_vol"] >= qty_threshold)
+        df = df[qmask & (df["_band"] == CIRCUIT_BAND_PCT)]
+    if listing_only:
+        _today = pd.Timestamp.now().normalize()
+        newest = _today - pd.DateOffset(months=int(listing_min_months))
+        oldest = _today - pd.DateOffset(months=int(listing_max_months))
+        ld = pd.to_datetime(df["ListingDate"], errors="coerce")
+        df = df[(ld >= oldest) & (ld <= newest)]
+
+    if df.empty:
+        return pd.DataFrame(columns=RESULT_COLUMNS)
+
+    def _band_disp(row):
+        bn = row["_band"]
+        return int(bn) if bn is not None and not pd.isna(bn) else ("NB" if row["is_fno"] else "—")
+
+    def _ld_disp(v):
+        return v if isinstance(v, str) and v else "—"
+
+    out = pd.DataFrame({
+        "Symbol": df["Symbol"],
+        "Company": df["Company"],
+        "LastClose": df["_close"].round(2),
+        "52wHigh": df["_high"].round(2),
+        "HighDate": df[hd_col],
+        "DaysSinceHigh": df["_days"].astype(int),
+        "PctFromHigh": df["_pct"].round(2),
+        "AvgVol20d": df["_vol"].astype(int),
+        "F&O": df["is_fno"].map(lambda x: "Yes" if x else "No"),
+        "Band%": df.apply(_band_disp, axis=1),
+        "ListingDate": df["ListingDate"].map(_ld_disp),
+        "Basis": "Intraday High" if basis == "high" else "Daily Close",
+    }, columns=RESULT_COLUMNS)
+    return out.sort_values("PctFromHigh").reset_index(drop=True)

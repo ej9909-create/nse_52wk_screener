@@ -1,0 +1,4 @@
+# Deps for the nightly snapshot job only (no streamlit needed).
+yfinance>=0.2.50
+pandas>=2.1
+requests>=2.31

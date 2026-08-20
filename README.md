@@ -146,10 +146,14 @@ app (HTTP 200), rather than bouncing off the edge.
   re-enable it from the Actions tab. (Alternatively, a free external pinger like
   UptimeRobot avoids this.)
 
-## Daily use
-Run it **after market close**. The first person to run it that day triggers the
-~2-minute fetch of ~2,000 stocks; everyone else gets the same cached list instantly
-for the next 12 hours. The **↻ Refresh data** button forces a fresh fetch.
+## Daily use & how it stays fast/reliable
+The web app does **no** price fetching or heavy compute at request time. A nightly
+GitHub Action (`build-snapshot`, ~19:30 IST after close) runs the full ~2,500-symbol
+fetch, computes each stock's base metrics for **both** bases, and commits
+`data/screener_snapshot.csv`. The app just **reads that snapshot and filters it
+in-memory (instant)** — so it can't exhaust the host and every user gets results
+immediately. Rebuild manually via **Actions ▸ build-snapshot ▸ Run workflow**, or
+in-app with **↻ Reload snapshot** after a rebuild.
 
 ---
 

@@ -81,39 +81,13 @@ require_passcode()
 
 
 # ----------------------------------------------------------------------------
-# Cached screen — computed once per (day, settings), shared across all users
+# Snapshot loader — the app just READS the nightly precomputed table (no fetch,
+# no heavy compute at request time). Filtering happens instantly in-memory.
 # ----------------------------------------------------------------------------
-@st.cache_data(ttl=12 * 3600, show_spinner=False)
-def run_screen(trade_date: str, basis: str, min_days: int,
-               band_low: float, band_high: float,
-               fno_only: bool, qty_circuit_only: bool, qty_threshold, qty_keep: str,
-               listing_only: bool, listing_min_months: int, listing_max_months: int):
-    universe = screener.load_universe()
-    bar = st.progress(0.0, text="Fetching prices from Yahoo Finance…")
-
-    def _cb(done, total):
-        bar.progress(done / total, text=f"Fetching prices… {done}/{total} symbols")
-
-    results, stats = screener.fetch_and_screen(
-        universe, basis=basis, min_days=min_days,
-        band_low=band_low, band_high=band_high,
-        fno_only=fno_only, qty_circuit_only=qty_circuit_only,
-        qty_threshold=qty_threshold, qty_keep=qty_keep,
-        listing_only=listing_only,
-        listing_min_months=listing_min_months, listing_max_months=listing_max_months,
-        progress_cb=_cb,
-    )
-    bar.empty()
-    # ScreenStats isn't picklable-friendly for display; return a plain dict too
-    return results, {
-        "universe": stats.universe,
-        "fetched": stats.fetched,
-        "matched": len(results),
-        "skipped_no_data": len(stats.skipped_no_data),
-        "skipped_short_history": len(stats.skipped_short_history),
-        "split_warnings": stats.split_warnings,
-        "as_of": stats.as_of,
-    }
+@st.cache_data(ttl=6 * 3600, show_spinner=False)
+def load_snap():
+    snap = screener.load_snapshot()
+    return snap, snap.attrs.get("as_of")
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -218,11 +192,11 @@ with st.sidebar:
         )
 
     run = st.button("▶ Run screener", type="primary", use_container_width=True)
-    if st.button("↻ Refresh data (clear cache)", use_container_width=True):
+    if st.button("↻ Reload snapshot", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
-    st.caption("First run of the day fetches ~2,000 stocks (a few minutes). "
-               "After that everyone gets the cached list instantly.")
+    st.caption("Results are instant — read from the nightly precomputed snapshot. "
+               "It refreshes automatically after market close.")
     if st.button("Log out", use_container_width=True):
         st.session_state.auth_ok = False
         st.rerun()
@@ -236,21 +210,30 @@ if fno_only and qty_circuit_only:
         "Use just one of the two."
     )
 
-if run or st.session_state.get("has_run"):
-    st.session_state.has_run = True
-    trade_date = datetime.now(IST).strftime("%Y-%m-%d")
-    with st.spinner("Running screener…"):
-        results, stats = run_screen(
-            trade_date, basis, int(min_days), float(band_low), float(band_high),
-            fno_only, qty_circuit_only, int(qty_threshold), qty_keep,
-            listing_only, int(listing_min_months), int(listing_max_months),
-        )
+snap, snap_as_of = load_snap()
 
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Universe", stats["universe"])
-    c2.metric("Priced", stats["fetched"])
-    c3.metric("Matches", stats["matched"])
-    c4.metric("As of", stats["as_of"] or "—")
+if snap.empty:
+    st.warning(
+        "The daily snapshot isn't available yet. The nightly **build-snapshot** "
+        "job populates it after market close — run that GitHub Action once if this "
+        "persists."
+    )
+elif run or st.session_state.get("has_run"):
+    st.session_state.has_run = True
+    results = screener.screen_snapshot(
+        snap, basis=basis, min_days=int(min_days),
+        band_low=float(band_low), band_high=float(band_high),
+        fno_only=fno_only, qty_circuit_only=qty_circuit_only,
+        qty_threshold=int(qty_threshold), qty_keep=qty_keep,
+        listing_only=listing_only,
+        listing_min_months=int(listing_min_months),
+        listing_max_months=int(listing_max_months),
+    )
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Priced universe", f"{len(snap):,}")
+    c2.metric("Matches", f"{len(results):,}")
+    c3.metric("As of", snap_as_of or "—")
 
     opt = []
     if fno_only:
@@ -264,9 +247,7 @@ if run or st.session_state.get("has_run"):
                else "optional filters **off**")
     st.caption(
         f"Basis: **{basis_label}**  •  high older than **{int(min_days)}d**  •  "
-        f"pullback **{band_low:g}–{band_high:g}%**  •  {opt_txt}  •  "
-        f"no data: {stats['skipped_no_data']}, short history: "
-        f"{stats['skipped_short_history']}"
+        f"pullback **{band_low:g}–{band_high:g}%**  •  {opt_txt}"
     )
 
     if results.empty:
@@ -274,7 +255,7 @@ if run or st.session_state.get("has_run"):
     else:
         st.dataframe(results, use_container_width=True, hide_index=True)
 
-        stamp = datetime.now(IST).strftime("%Y%m%d")
+        stamp = (snap_as_of or datetime.now(IST).strftime("%Y-%m-%d")).replace("-", "")
         d1, d2 = st.columns(2)
         d1.download_button(
             "⬇ Download CSV",
@@ -290,10 +271,5 @@ if run or st.session_state.get("has_run"):
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
         )
-
-    if stats["split_warnings"]:
-        with st.expander(f"⚠ {len(stats['split_warnings'])} possible split/bonus "
-                         "(unadjusted prices — eyeball these)"):
-            st.write(", ".join(stats["split_warnings"]))
 else:
     st.info("Pick your settings on the left and hit **Run screener**.")
