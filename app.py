@@ -154,31 +154,41 @@ def _alert_form(symbol: str, current: float, high52: float | None, *, key_prefix
         else:
             try:
                 alerts_db.add_alert(symbol, upper=upper, lower=lower, note=note or None)
-                st.success(f"Alert saved for {symbol}. Manage it in the 🔔 Price Alerts tab.")
+                st.toast(f"Alert saved for {symbol}", icon="🔔")
+                st.rerun()  # closes the dialog (if open) and refreshes the list
             except Exception as e:
                 st.error(f"Couldn't save alert: {e}")
 
 
-def _render_quick_add(event, results: pd.DataFrame):
-    """Show an add-alert panel for the row the user clicked in the results table."""
+@st.dialog("🔔 Add price alert")
+def _alert_dialog(symbol: str, current: float, high52: float | None):
+    """Modal add-alert form — pops up centered so it's visible however far the
+    results table is scrolled (no more hunting below the fold)."""
+    _alert_form(symbol, current, high52, key_prefix=f"dlg_{symbol}")
+
+
+def _maybe_open_alert_dialog(event, results: pd.DataFrame):
+    """Open the add-alert modal when the user selects a new row. Guarded by the
+    last-handled symbol so dismissing the dialog doesn't immediately reopen it."""
     try:
         rows = event.selection.rows
     except Exception:
         rows = []
     if not rows:
-        st.caption("💡 Click a row above to set a price alert for that stock.")
+        st.session_state.pop("_alert_dlg_symbol", None)
         return
+    row = results.iloc[rows[0]]
+    symbol = str(row["Symbol"])
+    if st.session_state.get("_alert_dlg_symbol") == symbol:
+        return  # this selection was already handled (dialog open or dismissed)
     if not alerts_db.configured():
         st.info("Price alerts aren't configured yet — add SUPABASE_URL and "
                 "SUPABASE_SERVICE_KEY to the app secrets to enable them.")
         return
-    row = results.iloc[rows[0]]
-    symbol = str(row["Symbol"])
+    st.session_state["_alert_dlg_symbol"] = symbol
     current = float(row["LastClose"]) if pd.notna(row["LastClose"]) else 0.0
     high52 = float(row["52wHigh"]) if pd.notna(row["52wHigh"]) else None
-    with st.container(border=True):
-        st.subheader(f"🔔 Add price alert — {symbol}")
-        _alert_form(symbol, current, high52, key_prefix=f"qa_{symbol}")
+    _alert_dialog(symbol, current, high52)
 
 
 def _render_alerts_tab(snap: pd.DataFrame):
@@ -416,11 +426,13 @@ with tab_screen:
         if results.empty:
             st.warning("No stocks matched today's filters.")
         else:
+            st.caption("💡 **Click any row** (checkbox on the left) to set a price "
+                       "alert for that stock — a quick form pops up.")
             event = st.dataframe(
                 results, use_container_width=True, hide_index=True,
                 on_select="rerun", selection_mode="single-row",
             )
-            _render_quick_add(event, results)
+            _maybe_open_alert_dialog(event, results)
 
             stamp = (snap_as_of or datetime.now(IST).strftime("%Y-%m-%d")).replace("-", "")
             d1, d2 = st.columns(2)
