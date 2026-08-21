@@ -164,6 +164,8 @@ def _alert_form(symbol: str, snap_close: float, high52: float | None, *, key_pre
 
     st.caption("Defaults: **Above** = 52-week high (breakout), **Below** = 5% under "
                "the current price. Tick either side, adjust, and add.")
+    st.caption("⚡ The alert triggers on **real-time** price — the ₹ shown above is "
+               "just a ~15 min delayed reference for picking levels.")
     note = st.text_input("Note (optional)", key=f"{key_prefix}_note",
                          placeholder="e.g. breakout watch")
 
@@ -216,9 +218,10 @@ def _maybe_open_alert_dialog(event, results: pd.DataFrame):
 
 def _render_alerts_tab(snap: pd.DataFrame):
     st.subheader("🔔 Price Alerts")
-    st.caption("Alerts fire when a stock crosses a level (either direction) and are "
-               "pushed to Telegram by the always-on alerter. This tab creates and "
-               "manages them.")
+    st.caption("⚡ Alerts are evaluated on **real-time** prices by the always-on "
+               "alerter and pushed to Telegram the instant a level is crossed. "
+               "Prices shown on this page are ~15 min delayed (reference only) — "
+               "the alerts themselves are not.")
 
     if not alerts_db.configured():
         st.info("Price alerts aren't configured. Add **SUPABASE_URL** and "
@@ -254,7 +257,8 @@ def _render_alerts_tab(snap: pd.DataFrame):
         return
 
     st.markdown(f"##### Your alerts ({len(alerts)})")
-    st.caption("Current = live price (~15 min delayed); other columns are your set levels.")
+    st.caption("Current = ~15 min delayed reference; your set levels are the other "
+               "columns. ⚡ Alerts fire on real-time prices, not this delayed value.")
 
     def _fmt(v):
         return "—" if v is None else f"₹{float(v):,.2f}"
