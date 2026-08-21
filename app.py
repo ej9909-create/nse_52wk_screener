@@ -35,6 +35,8 @@ import nse_screener
 importlib.reload(nse_screener)
 screener = nse_screener
 
+import alerts_db  # Supabase-backed price alerts (degrades gracefully if unset)
+
 IST = ZoneInfo("Asia/Kolkata")
 
 st.set_page_config(
@@ -103,6 +105,156 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
     with pd.ExcelWriter(buf, engine="openpyxl") as xl:
         df.to_excel(xl, index=False, sheet_name="Screener")
     return buf.getvalue()
+
+
+# ----------------------------------------------------------------------------
+# Price-alert UI (writes to Supabase; shared with the alerter on the GCP VM)
+# ----------------------------------------------------------------------------
+def _snap_price_map(snap: pd.DataFrame) -> dict[str, tuple[float | None, float | None]]:
+    """Map {Symbol: (last_close, intraday_52w_high)} from the snapshot."""
+    out: dict[str, tuple[float | None, float | None]] = {}
+    if snap is None or snap.empty:
+        return out
+    for _, r in snap.iterrows():
+        close = float(r["LastClose"]) if pd.notna(r.get("LastClose")) else None
+        high = float(r["HighH"]) if pd.notna(r.get("HighH")) else None
+        out[str(r["Symbol"])] = (close, high)
+    return out
+
+
+def _alert_form(symbol: str, current: float, high52: float | None, *, key_prefix: str):
+    """Reusable add-alert block with smart defaults. Used by quick-add + search."""
+    hi_txt = f"  ·  52w high ₹{high52:,.2f}" if high52 else ""
+    st.markdown(f"**{symbol}** — current ₹{current:,.2f}{hi_txt}")
+
+    c1, c2 = st.columns(2)
+    up_on = c1.checkbox("Alert if it breaks ABOVE", value=bool(high52),
+                        key=f"{key_prefix}_upon")
+    up_default = float(high52) if high52 else round(current * 1.05, 2)
+    up_val = c1.number_input("Above ₹", min_value=0.0, value=up_default, step=1.0,
+                             key=f"{key_prefix}_upval", disabled=not up_on)
+    lo_on = c2.checkbox("Alert if it breaks BELOW", value=False,
+                        key=f"{key_prefix}_loon")
+    lo_default = round(current * 0.95, 2) if current else 0.0
+    lo_val = c2.number_input("Below ₹", min_value=0.0, value=lo_default, step=1.0,
+                             key=f"{key_prefix}_loval", disabled=not lo_on)
+
+    st.caption("Defaults: **Above** = 52-week high (breakout), **Below** = 5% under "
+               "the current price. Tick either side, adjust, and add.")
+    note = st.text_input("Note (optional)", key=f"{key_prefix}_note",
+                         placeholder="e.g. breakout watch")
+
+    if st.button("➕ Add alert", key=f"{key_prefix}_add", type="primary"):
+        upper = float(up_val) if up_on else None
+        lower = float(lo_val) if lo_on else None
+        if upper is None and lower is None:
+            st.error("Tick at least one of Above / Below.")
+        elif upper is not None and lower is not None and upper <= lower:
+            st.error("'Above' must be higher than 'Below'.")
+        else:
+            try:
+                alerts_db.add_alert(symbol, upper=upper, lower=lower, note=note or None)
+                st.success(f"Alert saved for {symbol}. Manage it in the 🔔 Price Alerts tab.")
+            except Exception as e:
+                st.error(f"Couldn't save alert: {e}")
+
+
+def _render_quick_add(event, results: pd.DataFrame):
+    """Show an add-alert panel for the row the user clicked in the results table."""
+    try:
+        rows = event.selection.rows
+    except Exception:
+        rows = []
+    if not rows:
+        st.caption("💡 Click a row above to set a price alert for that stock.")
+        return
+    if not alerts_db.configured():
+        st.info("Price alerts aren't configured yet — add SUPABASE_URL and "
+                "SUPABASE_SERVICE_KEY to the app secrets to enable them.")
+        return
+    row = results.iloc[rows[0]]
+    symbol = str(row["Symbol"])
+    current = float(row["LastClose"]) if pd.notna(row["LastClose"]) else 0.0
+    high52 = float(row["52wHigh"]) if pd.notna(row["52wHigh"]) else None
+    with st.container(border=True):
+        st.subheader(f"🔔 Add price alert — {symbol}")
+        _alert_form(symbol, current, high52, key_prefix=f"qa_{symbol}")
+
+
+def _render_alerts_tab(snap: pd.DataFrame):
+    st.subheader("🔔 Price Alerts")
+    st.caption("Alerts fire when a stock crosses a level (either direction) and are "
+               "pushed to Telegram by the always-on alerter. This tab creates and "
+               "manages them.")
+
+    if not alerts_db.configured():
+        st.info("Price alerts aren't configured. Add **SUPABASE_URL** and "
+                "**SUPABASE_SERVICE_KEY** to the app secrets (Manage app ▸ Settings "
+                "▸ Secrets) to enable creating and managing alerts.")
+        return
+
+    price_map = _snap_price_map(snap)
+
+    # --- Add any stock by search ---
+    with st.expander("➕ Add an alert (search any stock)", expanded=False):
+        pick = st.selectbox(
+            "Search by symbol", options=sorted(price_map.keys()), index=None,
+            placeholder="Type a symbol, e.g. RELIANCE", key="alert_search_pick",
+        )
+        if pick:
+            cur, hi = price_map.get(pick, (None, None))
+            if cur is None:
+                st.warning("No recent price for this symbol — enter levels manually.")
+                cur = 0.0
+            _alert_form(pick, cur, hi, key_prefix=f"search_{pick}")
+
+    st.divider()
+
+    # --- Existing alerts ---
+    try:
+        alerts = alerts_db.list_alerts()
+    except Exception as e:
+        st.error(f"Couldn't load alerts: {e}")
+        return
+    if not alerts:
+        st.caption("No alerts yet. Add one above, or click a row in the Screener tab.")
+        return
+
+    disp = []
+    for a in alerts:
+        cur = price_map.get(a["symbol"], (None, None))[0]
+        disp.append({
+            "Symbol": a["symbol"],
+            "Above ₹": a["upper_price"] if a["upper_price"] is not None else "—",
+            "Below ₹": a["lower_price"] if a["lower_price"] is not None else "—",
+            "Current ₹": round(cur, 2) if cur is not None else "—",
+            "Status": "✅ active" if a["active"] else "⏸ paused",
+            "Note": a.get("note") or "",
+        })
+    st.dataframe(pd.DataFrame(disp), use_container_width=True, hide_index=True)
+
+    # --- Manage one alert ---
+    def _label(a):
+        parts = []
+        if a["upper_price"] is not None:
+            parts.append(f"▲{a['upper_price']}")
+        if a["lower_price"] is not None:
+            parts.append(f"▼{a['lower_price']}")
+        return f"{a['symbol']}  ({' '.join(parts)})"
+
+    label_by_id = {a["id"]: _label(a) for a in alerts}
+    by_id = {a["id"]: a for a in alerts}
+    m1, m2, m3 = st.columns([3, 1, 1])
+    chosen = m1.selectbox("Manage alert", options=list(label_by_id.keys()),
+                          format_func=lambda i: label_by_id[i], key="manage_pick")
+    active = by_id[chosen]["active"]
+    if m2.button("Pause" if active else "Resume", use_container_width=True,
+                 key="manage_toggle"):
+        alerts_db.set_active(chosen, not active)
+        st.rerun()
+    if m3.button("Delete", use_container_width=True, key="manage_delete"):
+        alerts_db.delete_alert(chosen)
+        st.rerun()
 
 
 # ----------------------------------------------------------------------------
@@ -209,75 +361,85 @@ with st.sidebar:
         st.session_state.auth_ok = False
         st.rerun()
 
-# Upfront nudge: F&O (Filter 1) + Qty+Circuit (Filter 2) can never both be true —
-# F&O stocks have no price band, so band=20% is impossible for them.
-if fno_only and qty_circuit_only:
-    st.warning(
-        "⚠️ **Filter 1 (F&O) + Filter 2 (Qty + Upper circuit) will return 0 results.** "
-        "F&O stocks have no price band, so none can have a 20% band. "
-        "Use just one of the two."
-    )
-
 snap, snap_as_of = load_snap()
 
-if snap.empty:
-    st.warning(
-        "The daily snapshot isn't available yet. The nightly **build-snapshot** "
-        "job populates it after market close — run that GitHub Action once if this "
-        "persists."
-    )
-elif run or st.session_state.get("has_run"):
-    st.session_state.has_run = True
-    results = screener.screen_snapshot(
-        snap, basis=basis, min_days=int(min_days),
-        band_low=float(band_low), band_high=float(band_high),
-        fno_only=fno_only, qty_circuit_only=qty_circuit_only,
-        qty_threshold=int(qty_threshold), qty_keep=qty_keep,
-        listing_only=listing_only,
-        listing_min_months=int(listing_min_months),
-        listing_max_months=int(listing_max_months),
-    )
+tab_screen, tab_alerts = st.tabs(["📈 Screener", "🔔 Price Alerts"])
 
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Priced universe", f"{len(snap):,}")
-    c2.metric("Matches", f"{len(results):,}")
-    c3.metric("As of", snap_as_of or "—")
+with tab_screen:
+    # F&O (Filter 1) + Qty+Circuit (Filter 2) can never both be true — F&O stocks
+    # have no price band, so band=20% is impossible for them.
+    if fno_only and qty_circuit_only:
+        st.warning(
+            "⚠️ **Filter 1 (F&O) + Filter 2 (Qty + Upper circuit) will return 0 results.** "
+            "F&O stocks have no price band, so none can have a 20% band. "
+            "Use just one of the two."
+        )
 
-    opt = []
-    if fno_only:
-        opt.append("F&O only")
-    if qty_circuit_only:
-        _op = "≥" if qty_keep == "above" else "≤"
-        opt.append(f"qty {_op} {int(qty_threshold):,} + band 20%")
-    if listing_only:
-        opt.append(f"listed {int(listing_min_months)}–{int(listing_max_months)}mo ago")
-    opt_txt = (f"filters: **{'  AND  '.join(opt)}**" if opt
-               else "optional filters **off**")
-    st.caption(
-        f"Basis: **{basis_label}**  •  high older than **{int(min_days)}d**  •  "
-        f"pullback **{band_low:g}–{band_high:g}%**  •  {opt_txt}"
-    )
+    if snap.empty:
+        st.warning(
+            "The daily snapshot isn't available yet. The nightly **build-snapshot** "
+            "job populates it after market close — run that GitHub Action once if this "
+            "persists."
+        )
+    elif run or st.session_state.get("has_run"):
+        st.session_state.has_run = True
+        results = screener.screen_snapshot(
+            snap, basis=basis, min_days=int(min_days),
+            band_low=float(band_low), band_high=float(band_high),
+            fno_only=fno_only, qty_circuit_only=qty_circuit_only,
+            qty_threshold=int(qty_threshold), qty_keep=qty_keep,
+            listing_only=listing_only,
+            listing_min_months=int(listing_min_months),
+            listing_max_months=int(listing_max_months),
+        )
 
-    if results.empty:
-        st.warning("No stocks matched today's filters.")
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Priced universe", f"{len(snap):,}")
+        c2.metric("Matches", f"{len(results):,}")
+        c3.metric("As of", snap_as_of or "—")
+
+        opt = []
+        if fno_only:
+            opt.append("F&O only")
+        if qty_circuit_only:
+            _op = "≥" if qty_keep == "above" else "≤"
+            opt.append(f"qty {_op} {int(qty_threshold):,} + band 20%")
+        if listing_only:
+            opt.append(f"listed {int(listing_min_months)}–{int(listing_max_months)}mo ago")
+        opt_txt = (f"filters: **{'  AND  '.join(opt)}**" if opt
+                   else "optional filters **off**")
+        st.caption(
+            f"Basis: **{basis_label}**  •  high older than **{int(min_days)}d**  •  "
+            f"pullback **{band_low:g}–{band_high:g}%**  •  {opt_txt}"
+        )
+
+        if results.empty:
+            st.warning("No stocks matched today's filters.")
+        else:
+            event = st.dataframe(
+                results, use_container_width=True, hide_index=True,
+                on_select="rerun", selection_mode="single-row",
+            )
+            _render_quick_add(event, results)
+
+            stamp = (snap_as_of or datetime.now(IST).strftime("%Y-%m-%d")).replace("-", "")
+            d1, d2 = st.columns(2)
+            d1.download_button(
+                "⬇ Download CSV",
+                results.to_csv(index=False).encode("utf-8"),
+                file_name=f"nse_52wk_screener_{stamp}.csv",
+                mime="text/csv",
+                use_container_width=True,
+            )
+            d2.download_button(
+                "⬇ Download Excel",
+                to_excel_bytes(results),
+                file_name=f"nse_52wk_screener_{stamp}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                use_container_width=True,
+            )
     else:
-        st.dataframe(results, use_container_width=True, hide_index=True)
+        st.info("Pick your settings on the left and hit **Run screener**.")
 
-        stamp = (snap_as_of or datetime.now(IST).strftime("%Y-%m-%d")).replace("-", "")
-        d1, d2 = st.columns(2)
-        d1.download_button(
-            "⬇ Download CSV",
-            results.to_csv(index=False).encode("utf-8"),
-            file_name=f"nse_52wk_screener_{stamp}.csv",
-            mime="text/csv",
-            use_container_width=True,
-        )
-        d2.download_button(
-            "⬇ Download Excel",
-            to_excel_bytes(results),
-            file_name=f"nse_52wk_screener_{stamp}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            use_container_width=True,
-        )
-else:
-    st.info("Pick your settings on the left and hit **Run screener**.")
+with tab_alerts:
+    _render_alerts_tab(snap)

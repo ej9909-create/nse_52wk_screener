@@ -1,0 +1,86 @@
+"""Supabase access for the price-alert features in the screener.
+
+Self-contained on purpose: the screener deploys separately (Streamlit Cloud)
+from the alerter (GCP VM), so it carries its own copy of the DB layer rather
+than importing the alerter's. Mirrors stock_price_alerter/db.py.
+
+Config is read from st.secrets first (Streamlit Cloud), then environment vars
+(local dev). Degrades gracefully — if Supabase isn't configured or the package
+isn't installed, configured() returns False and the UI shows a hint instead of
+crashing the screener.
+"""
+from __future__ import annotations
+
+import os
+from typing import Any
+
+try:
+    from supabase import create_client
+    _HAS_SUPABASE = True
+except Exception:  # package not installed yet
+    _HAS_SUPABASE = False
+
+_client = None
+
+
+def _cred(name: str) -> str | None:
+    """st.secrets first (Cloud), then env var (local dev)."""
+    try:
+        import streamlit as st
+        if name in st.secrets:
+            return str(st.secrets[name])
+    except Exception:
+        pass
+    return os.getenv(name)
+
+
+def configured() -> bool:
+    """True only if the package is present and both creds are set."""
+    return _HAS_SUPABASE and bool(_cred("SUPABASE_URL")) and bool(
+        _cred("SUPABASE_SERVICE_KEY"))
+
+
+def _get_client():
+    global _client
+    if _client is None:
+        url, key = _cred("SUPABASE_URL"), _cred("SUPABASE_SERVICE_KEY")
+        if not (_HAS_SUPABASE and url and key):
+            raise RuntimeError("Supabase is not configured.")
+        _client = create_client(url, key)
+    return _client
+
+
+def add_alert(
+    symbol: str,
+    *,
+    upper: float | None = None,
+    lower: float | None = None,
+    exchange: str = "NSE",
+    note: str | None = None,
+) -> dict[str, Any]:
+    if upper is None and lower is None:
+        raise ValueError("Provide at least one of upper / lower.")
+    row = {
+        "symbol": symbol.strip().upper(),
+        "exchange": exchange,
+        "upper_price": upper,
+        "lower_price": lower,
+        "note": note,
+    }
+    return _get_client().table("alerts").insert(row).execute().data[0]
+
+
+def list_alerts(active_only: bool = False) -> list[dict[str, Any]]:
+    q = _get_client().table("alerts").select("*").order("created_at", desc=True)
+    if active_only:
+        q = q.eq("active", True)
+    return q.execute().data
+
+
+def set_active(alert_id: int, active: bool) -> None:
+    _get_client().table("alerts").update({"active": active}).eq(
+        "id", alert_id).execute()
+
+
+def delete_alert(alert_id: int) -> None:
+    _get_client().table("alerts").delete().eq("id", alert_id).execute()
