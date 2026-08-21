@@ -230,41 +230,39 @@ def _render_alerts_tab(snap: pd.DataFrame):
         st.caption("No alerts yet. Add one above, or click a row in the Screener tab.")
         return
 
-    disp = []
+    st.markdown(f"##### Your alerts ({len(alerts)})")
+
+    def _fmt(v):
+        return "—" if v is None else f"₹{float(v):,.2f}"
+
+    widths = [2.0, 1.3, 1.3, 1.3, 1.2, 1.2, 0.7]
+    hdr = st.columns(widths, vertical_alignment="center")
+    for col, label in zip(hdr, ["Symbol", "Above", "Below", "Current",
+                                 "Status", "", ""]):
+        if label:
+            col.caption(label)
+
     for a in alerts:
         cur = price_map.get(a["symbol"], (None, None))[0]
-        disp.append({
-            "Symbol": a["symbol"],
-            "Above ₹": a["upper_price"] if a["upper_price"] is not None else "—",
-            "Below ₹": a["lower_price"] if a["lower_price"] is not None else "—",
-            "Current ₹": round(cur, 2) if cur is not None else "—",
-            "Status": "✅ active" if a["active"] else "⏸ paused",
-            "Note": a.get("note") or "",
-        })
-    st.dataframe(pd.DataFrame(disp), use_container_width=True, hide_index=True)
-
-    # --- Manage one alert ---
-    def _label(a):
-        parts = []
-        if a["upper_price"] is not None:
-            parts.append(f"▲{a['upper_price']}")
-        if a["lower_price"] is not None:
-            parts.append(f"▼{a['lower_price']}")
-        return f"{a['symbol']}  ({' '.join(parts)})"
-
-    label_by_id = {a["id"]: _label(a) for a in alerts}
-    by_id = {a["id"]: a for a in alerts}
-    m1, m2, m3 = st.columns([3, 1, 1])
-    chosen = m1.selectbox("Manage alert", options=list(label_by_id.keys()),
-                          format_func=lambda i: label_by_id[i], key="manage_pick")
-    active = by_id[chosen]["active"]
-    if m2.button("Pause" if active else "Resume", use_container_width=True,
-                 key="manage_toggle"):
-        alerts_db.set_active(chosen, not active)
-        st.rerun()
-    if m3.button("Delete", use_container_width=True, key="manage_delete"):
-        alerts_db.delete_alert(chosen)
-        st.rerun()
+        c = st.columns(widths, vertical_alignment="center")
+        sym_md = f"**{a['symbol']}**"
+        if a.get("note"):
+            sym_md += f"  \n:gray[{a['note']}]"
+        c[0].markdown(sym_md)
+        c[1].write(_fmt(a["upper_price"]))
+        c[2].write(_fmt(a["lower_price"]))
+        c[3].write(_fmt(cur))
+        c[4].write("✅ active" if a["active"] else "⏸ paused")
+        if c[5].button("Pause" if a["active"] else "Resume",
+                       key=f"toggle_{a['id']}", use_container_width=True):
+            alerts_db.set_active(a["id"], not a["active"])
+            st.toast(("Paused " if a["active"] else "Resumed ") + a["symbol"], icon="🔔")
+            st.rerun()
+        if c[6].button("🗑", key=f"delete_{a['id']}", use_container_width=True,
+                       help=f"Delete the {a['symbol']} alert"):
+            alerts_db.delete_alert(a["id"])
+            st.toast(f"Deleted {a['symbol']} alert", icon="🗑️")
+            st.rerun()
 
 
 # ----------------------------------------------------------------------------
