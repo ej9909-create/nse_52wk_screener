@@ -122,10 +122,33 @@ def _snap_price_map(snap: pd.DataFrame) -> dict[str, tuple[float | None, float |
     return out
 
 
-def _alert_form(symbol: str, current: float, high52: float | None, *, key_prefix: str):
-    """Reusable add-alert block with smart defaults. Used by quick-add + search."""
+@st.cache_data(ttl=60, show_spinner=False)
+def _live_price(symbol: str) -> float | None:
+    """Live-ish last price (~15 min delayed) via yfinance; None on failure.
+
+    The snapshot's LastClose is the *previous day's* close, which can be well
+    off intraday — so for setting alert levels we prefer a live quote. Cached
+    60s so repeated reruns don't re-fetch.
+    """
+    try:
+        import yfinance as yf
+        p = yf.Ticker(f"{symbol}.NS").fast_info.last_price
+        return round(float(p), 2) if p else None
+    except Exception:
+        return None
+
+
+def _alert_form(symbol: str, snap_close: float, high52: float | None, *, key_prefix: str):
+    """Reusable add-alert block with smart defaults. Used by quick-add + search.
+
+    Prefers a live (~15 min delayed) price for the shown price and the threshold
+    defaults, falling back to the snapshot's previous close if the fetch fails.
+    """
+    live = _live_price(symbol)
+    current = live if live else snap_close
+    src = "live ~15m delay" if live else "prev close"
     hi_txt = f"  ·  52w high ₹{high52:,.2f}" if high52 else ""
-    st.markdown(f"**{symbol}** — current ₹{current:,.2f}{hi_txt}")
+    st.markdown(f"**{symbol}** — {src} ₹{current:,.2f}{hi_txt}")
 
     c1, c2 = st.columns(2)
     up_on = c1.checkbox("Alert if it breaks ABOVE", value=bool(high52),
@@ -231,6 +254,7 @@ def _render_alerts_tab(snap: pd.DataFrame):
         return
 
     st.markdown(f"##### Your alerts ({len(alerts)})")
+    st.caption("Current = live price (~15 min delayed); other columns are your set levels.")
 
     def _fmt(v):
         return "—" if v is None else f"₹{float(v):,.2f}"
@@ -243,7 +267,7 @@ def _render_alerts_tab(snap: pd.DataFrame):
             col.caption(label)
 
     for a in alerts:
-        cur = price_map.get(a["symbol"], (None, None))[0]
+        cur = _live_price(a["symbol"]) or price_map.get(a["symbol"], (None, None))[0]
         c = st.columns(widths, vertical_alignment="center")
         sym_md = f"**{a['symbol']}**"
         if a.get("note"):
