@@ -459,8 +459,8 @@ with tab_screen:
         else:
             # Columns shown in the table + downloads (full `results` is still used
             # for the per-row quick-add, which reads LastClose/52wHigh).
-            show_cols = ["Symbol", "52wHigh", "HighDate", "DaysSinceHigh",
-                         "PctFromHigh", "AvgVol20d"]
+            show_cols = ["Symbol", "PctFromHigh", "LastClose", "52wHigh",
+                         "DaysSinceHigh", "HighDate", "AvgVol20d"]
             display = results[[c for c in show_cols if c in results.columns]]
 
             st.caption("💡 **Click any row** (checkbox on the left) to set a price "
