@@ -314,13 +314,8 @@ st.markdown(
 
 with st.sidebar:
     st.header("Settings")
-    basis_label = st.radio(
-        "52-week high based on",
-        ["Intraday High", "Daily Close"],
-        help="Intraday High matches NSE's official 52-week high. "
-             "Daily Close ignores intraday spikes.",
-    )
-    basis = "high" if basis_label == "Intraday High" else "close"
+    # 52-week high is always the intraday high (NSE's official basis).
+    basis = "high"
 
     with st.expander("Advanced filters"):
         min_days = st.number_input(
@@ -455,33 +450,39 @@ with tab_screen:
         opt_txt = (f"filters: **{'  AND  '.join(opt)}**" if opt
                    else "optional filters **off**")
         st.caption(
-            f"Basis: **{basis_label}**  •  high older than **{int(min_days)}d**  •  "
+            f"52w high older than **{int(min_days)}d**  •  "
             f"pullback **{band_low:g}–{band_high:g}%**  •  {opt_txt}"
         )
 
         if results.empty:
             st.warning("No stocks matched today's filters.")
         else:
+            # Columns shown in the table + downloads (full `results` is still used
+            # for the per-row quick-add, which reads LastClose/52wHigh).
+            show_cols = ["Symbol", "52wHigh", "HighDate", "DaysSinceHigh",
+                         "PctFromHigh", "AvgVol20d"]
+            display = results[[c for c in show_cols if c in results.columns]]
+
             st.caption("💡 **Click any row** (checkbox on the left) to set a price "
                        "alert for that stock — a quick form pops up.")
             event = st.dataframe(
-                results, use_container_width=True, hide_index=True,
+                display, use_container_width=True, hide_index=True,
                 on_select="rerun", selection_mode="single-row",
             )
-            _maybe_open_alert_dialog(event, results)
+            _maybe_open_alert_dialog(event, results)   # full results (has LastClose)
 
             stamp = (snap_as_of or datetime.now(IST).strftime("%Y-%m-%d")).replace("-", "")
             d1, d2 = st.columns(2)
             d1.download_button(
                 "⬇ Download CSV",
-                results.to_csv(index=False).encode("utf-8"),
+                display.to_csv(index=False).encode("utf-8"),
                 file_name=f"nse_52wk_screener_{stamp}.csv",
                 mime="text/csv",
                 use_container_width=True,
             )
             d2.download_button(
                 "⬇ Download Excel",
-                to_excel_bytes(results),
+                to_excel_bytes(display),
                 file_name=f"nse_52wk_screener_{stamp}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True,
