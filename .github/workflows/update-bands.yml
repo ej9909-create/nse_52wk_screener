@@ -1,15 +1,16 @@
 name: update-price-bands
 
 # Nightly per-symbol price-band feed via Angel One SmartAPI.
-# Runs after market close on weekdays (13:30 UTC = 19:00 IST), writes
+# Runs after market close on weekdays (11:30 UTC = 17:00 IST), writes
 # data/price_bands.csv, and commits it so Streamlit redeploys with fresh bands.
+# Kept ~30 min before build-snapshot so the snapshot picks up fresh bands.
 #
 # Dormant until these repo secrets are set:
 #   ANGEL_API_KEY, ANGEL_CLIENT_CODE, ANGEL_PIN, ANGEL_TOTP_SECRET
 
 on:
   schedule:
-    - cron: "30 13 * * 1-5"
+    - cron: "30 11 * * 1-5"
   workflow_dispatch: {}
 
 permissions:

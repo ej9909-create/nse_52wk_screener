@@ -2,12 +2,12 @@ name: build-snapshot
 
 # Precomputes the daily screener snapshot (the heavy fetch) so the web app only
 # has to READ + filter it — keeping the app fast and reliable. Runs after market
-# close on weekdays (14:00 UTC = 19:30 IST), ~30 min after the price-band feed so
+# close on weekdays (12:00 UTC = 17:30 IST), ~30 min after the price-band feed so
 # it picks up fresh bands. Commits data/screener_snapshot.csv.
 
 on:
   schedule:
-    - cron: "0 14 * * 1-5"
+    - cron: "0 12 * * 1-5"
   workflow_dispatch: {}
 
 permissions:
