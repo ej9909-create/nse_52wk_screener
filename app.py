@@ -222,6 +222,8 @@ def _render_alerts_tab(snap: pd.DataFrame):
                "alerter and pushed to Telegram the instant a level is crossed. "
                "Prices shown on this page are ~15 min delayed (reference only) — "
                "the alerts themselves are not.")
+    st.caption("🎯 Each alert fires **once**, then retires (shown as *triggered*) — "
+               "no repeat pings. Hit **Re-arm** to watch it again.")
 
     if not alerts_db.configured():
         st.info("Price alerts aren't configured. Add **SUPABASE_URL** and "
@@ -276,15 +278,23 @@ def _render_alerts_tab(snap: pd.DataFrame):
         sym_md = f"**{a['symbol']}**"
         if a.get("note"):
             sym_md += f"  \n:gray[{a['note']}]"
+        active = a["active"]
+        triggered = (not active) and a.get("last_alert_at")
+        status = "✅ active" if active else ("🎯 triggered" if triggered else "⏸ paused")
         c[0].markdown(sym_md)
         c[1].write(_fmt(a["upper_price"]))
         c[2].write(_fmt(a["lower_price"]))
         c[3].write(_fmt(cur))
-        c[4].write("✅ active" if a["active"] else "⏸ paused")
-        if c[5].button("Pause" if a["active"] else "Resume",
-                       key=f"toggle_{a['id']}", use_container_width=True):
-            alerts_db.set_active(a["id"], not a["active"])
-            st.toast(("Paused " if a["active"] else "Resumed ") + a["symbol"], icon="🔔")
+        c[4].write(status)
+        btn = "Pause" if active else ("Re-arm" if triggered else "Resume")
+        if c[5].button(btn, key=f"toggle_{a['id']}", use_container_width=True):
+            if active:
+                alerts_db.set_active(a["id"], False)
+                st.toast(f"Paused {a['symbol']}", icon="🔔")
+            else:
+                alerts_db.rearm(a["id"])   # resume/re-arm: active + clear trigger
+                st.toast(f"{'Re-armed' if triggered else 'Resumed'} {a['symbol']}",
+                         icon="🔔")
             st.rerun()
         if c[6].button("🗑", key=f"delete_{a['id']}", use_container_width=True,
                        help=f"Delete the {a['symbol']} alert"):

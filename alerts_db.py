@@ -82,5 +82,12 @@ def set_active(alert_id: int, active: bool) -> None:
         "id", alert_id).execute()
 
 
+def rearm(alert_id: int) -> None:
+    """Re-activate an alert and clear its trigger stamp, so it watches again.
+    Used to resume a paused alert or re-arm one that already fired (one-shot)."""
+    _get_client().table("alerts").update(
+        {"active": True, "last_alert_at": None}).eq("id", alert_id).execute()
+
+
 def delete_alert(alert_id: int) -> None:
     _get_client().table("alerts").delete().eq("id", alert_id).execute()
