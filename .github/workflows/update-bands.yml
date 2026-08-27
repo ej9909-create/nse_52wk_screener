@@ -10,7 +10,7 @@ name: update-price-bands
 
 on:
   schedule:
-    - cron: "30 11 * * 1-5"
+    - cron: "37 11 * * 1-5"
   workflow_dispatch: {}
 
 permissions:
