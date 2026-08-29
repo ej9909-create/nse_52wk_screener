@@ -21,6 +21,8 @@ from datetime import datetime, timedelta
 
 import pandas as pd
 
+import frontier  # high-water frontier for multi-year / all-time high windows
+
 try:  # yfinance is only needed at run time, not for importing helpers
     import yfinance as yf
 except Exception:  # pragma: no cover
@@ -47,11 +49,16 @@ DEFAULT_LISTING_MAX_MONTHS = 12 # listing-window filter: oldest age
 
 FO_PATH = "data/fo_stocks.csv"        # bundled F&O underlyings list
 BANDS_PATH = "data/price_bands.csv"   # nightly per-symbol price bands (broker feed)
-SNAPSHOT_PATH = "data/screener_snapshot.csv"  # nightly precomputed base metrics
+SNAPSHOT_PATH = "data/screener_snapshot.csv"      # nightly precomputed base metrics
+FRONTIER_STORE_PATH = "data/frontier_store.csv"   # maintained high-water frontier store
 
+DEFAULT_MIN_HISTORY_DAYS = 200  # skip stocks with too little history for a high
+
+# Snapshot the app reads: all-time-high + the encoded frontier (for any N-year
+# window) + the reference/liquidity fields.
 SNAPSHOT_COLUMNS = [
-    "Symbol", "Company", "LastClose", "HighH", "HighHDate", "HighC", "HighCDate",
-    "AvgVol20d", "is_fno", "Band", "ListingDate", "LastDate",
+    "Symbol", "Company", "LastClose", "AvgVol20d", "is_fno", "Band",
+    "ListingDate", "LastDate", "HighATH", "HighATHDate", "Frontier",
 ]
 
 RESULT_COLUMNS = [
@@ -359,9 +366,61 @@ def load_snapshot(path: str = SNAPSHOT_PATH) -> pd.DataFrame:
     return snap
 
 
+def merge_reference(price_df: pd.DataFrame) -> pd.DataFrame:
+    """Add F&O / band / listing reference fields to a price-derived frame and
+    emit exactly SNAPSHOT_COLUMNS.
+
+    `price_df` carries the per-stock price fields (Symbol, Company, LastClose,
+    AvgVol20d, LastDate, HighATH, HighATHDate, Frontier). This merges the
+    reference data so the snapshot doubles as the frontier store (one file).
+    """
+    df = price_df.copy()
+    df["Symbol"] = df["Symbol"].astype(str).str.strip()
+
+    uni = load_universe()
+    is_fno = dict(zip(uni["Symbol"], uni["is_fno"]))
+    band = dict(zip(uni["Symbol"], uni["Band"]))
+    listing = dict(zip(uni["Symbol"], uni["ListingDate"]))
+
+    df["is_fno"] = df["Symbol"].map(is_fno).fillna(False)
+    df["Band"] = df["Symbol"].map(band)
+    ld = pd.to_datetime(df["Symbol"].map(listing), errors="coerce")
+    df["ListingDate"] = ld.dt.date.astype("string").fillna("")
+    for col in SNAPSHOT_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+    return df[SNAPSHOT_COLUMNS]
+
+
+def _window_high(df: pd.DataFrame, window, as_of) -> tuple[pd.Series, pd.Series]:
+    """Return (high, high_date) Series for the chosen window.
+
+    window = "ath" (all-time high, direct columns) or a number of years (derived
+    per-row from the encoded Frontier). Falls back to legacy HighH columns if the
+    snapshot predates the frontier format.
+    """
+    is_ath = window is None or str(window).lower() in ("ath", "all", "alltime", "all-time")
+    if is_ath and "HighATH" in df.columns:
+        return pd.to_numeric(df["HighATH"], errors="coerce"), \
+            pd.to_datetime(df["HighATHDate"], errors="coerce")
+    if not is_ath and "Frontier" in df.columns:
+        cutoff = frontier.years_cutoff(float(window),
+                                       as_of.date() if pd.notna(as_of) else None)
+        highs, dates = [], []
+        for s in df["Frontier"]:
+            p, d = frontier.nyear_high(frontier.decode_frontier(s), cutoff)
+            highs.append(p)
+            dates.append(d)
+        return pd.to_numeric(pd.Series(highs, index=df.index), errors="coerce"), \
+            pd.to_datetime(pd.Series(dates, index=df.index), errors="coerce")
+    # legacy fallback (old snapshot format)
+    return pd.to_numeric(df.get("HighH"), errors="coerce"), \
+        pd.to_datetime(df.get("HighHDate"), errors="coerce")
+
+
 def screen_snapshot(
     snap: pd.DataFrame,
-    basis: str = "high",
+    window="ath",
     min_days: int = DEFAULT_MIN_DAYS,
     band_low: float = DEFAULT_BAND_LOW,
     band_high: float = DEFAULT_BAND_HIGH,
@@ -377,11 +436,12 @@ def screen_snapshot(
     LIGHT step — the web app runs this. Applies the base screen + optional filters
     to the precomputed snapshot in memory (no network, no heavy compute).
 
-    Base (always): 52-week high older than `min_days` AND close `band_low`..
-    `band_high`% below it. Optional (AND when enabled): F&O; Qty+Circuit (avg vol
-    vs threshold by direction AND band==20%); Listing window (min..max months).
+    `window` selects the high: "ath" (all-time, default) or a number of years
+    (any N; derived from the per-stock frontier). Base (always): the window high
+    is older than `min_days` AND close is `band_low`..`band_high`% below it.
+    Optional (AND when enabled): F&O; Qty+Circuit (avg vol vs threshold by
+    direction AND band==20%); Listing window (min..max months).
     """
-    basis = "high" if str(basis).lower().startswith("h") else "close"
     if snap is None or snap.empty:
         return pd.DataFrame(columns=RESULT_COLUMNS)
 
@@ -389,10 +449,8 @@ def screen_snapshot(
     if "is_fno" in df.columns and df["is_fno"].dtype == object:
         df["is_fno"] = df["is_fno"].map(lambda x: str(x).strip().lower() in ("true", "1"))
     as_of = pd.to_datetime(df["LastDate"], errors="coerce").max()
-    hi_col, hd_col = ("HighH", "HighHDate") if basis == "high" else ("HighC", "HighCDate")
 
-    df["_high"] = pd.to_numeric(df[hi_col], errors="coerce")
-    df["_hdate"] = pd.to_datetime(df[hd_col], errors="coerce")
+    df["_high"], df["_hdate"] = _window_high(df, window, as_of)
     df["_close"] = pd.to_numeric(df["LastClose"], errors="coerce")
     df = df[df["_high"].notna() & (df["_high"] > 0)
             & df["_hdate"].notna() & df["_close"].notna()].copy()
@@ -433,18 +491,20 @@ def screen_snapshot(
     def _ld_disp(v):
         return v if isinstance(v, str) and v else "—"
 
+    is_ath = window is None or str(window).lower().startswith(("ath", "all"))
+    win_label = "All-time" if is_ath else f"{window:g}-year"
     out = pd.DataFrame({
         "Symbol": df["Symbol"],
         "Company": df["Company"],
         "LastClose": df["_close"].round(2),
-        "52wHigh": df["_high"].round(2),
-        "HighDate": df[hd_col],
+        "52wHigh": df["_high"].round(2),   # holds the selected-window high
+        "HighDate": df["_hdate"].dt.date.astype(str),
         "DaysSinceHigh": df["_days"].astype(int),
         "PctFromHigh": df["_pct"].round(2),
         "AvgVol20d": df["_vol"].astype(int),
         "F&O": df["is_fno"].map(lambda x: "Yes" if x else "No"),
         "Band%": df.apply(_band_disp, axis=1),
         "ListingDate": df["ListingDate"].map(_ld_disp),
-        "Basis": "Intraday High" if basis == "high" else "Daily Close",
+        "Basis": win_label,
     }, columns=RESULT_COLUMNS)
     return out.sort_values("PctFromHigh").reset_index(drop=True)

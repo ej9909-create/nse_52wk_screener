@@ -111,13 +111,13 @@ def to_excel_bytes(df: pd.DataFrame) -> bytes:
 # Price-alert UI (writes to Supabase; shared with the alerter on the GCP VM)
 # ----------------------------------------------------------------------------
 def _snap_price_map(snap: pd.DataFrame) -> dict[str, tuple[float | None, float | None]]:
-    """Map {Symbol: (last_close, intraday_52w_high)} from the snapshot."""
+    """Map {Symbol: (last_close, all_time_high)} from the snapshot."""
     out: dict[str, tuple[float | None, float | None]] = {}
     if snap is None or snap.empty:
         return out
     for _, r in snap.iterrows():
         close = float(r["LastClose"]) if pd.notna(r.get("LastClose")) else None
-        high = float(r["HighH"]) if pd.notna(r.get("HighH")) else None
+        high = float(r["HighATH"]) if pd.notna(r.get("HighATH")) else None
         out[str(r["Symbol"])] = (close, high)
     return out
 
@@ -147,7 +147,7 @@ def _alert_form(symbol: str, snap_close: float, high52: float | None, *, key_pre
     live = _live_price(symbol)
     current = live if live else snap_close
     src = "live ~15m delay" if live else "prev close"
-    hi_txt = f"  ·  52w high ₹{high52:,.2f}" if high52 else ""
+    hi_txt = f"  ·  all-time high ₹{high52:,.2f}" if high52 else ""
     st.markdown(f"**{symbol}** — {src} ₹{current:,.2f}{hi_txt}")
 
     c1, c2 = st.columns(2)
@@ -306,29 +306,45 @@ def _render_alerts_tab(snap: pd.DataFrame):
 # ----------------------------------------------------------------------------
 # Main UI
 # ----------------------------------------------------------------------------
-st.title("📈 NSE 52-Week Pullback Screener")
+st.title("📈 NSE Pullback Screener")
 st.markdown(
-    "Stocks that made their **52-week high a while ago** and are now sitting "
-    "**just below it** — an old peak, a shallow pullback, no fresh breakout yet."
+    "Stocks that made their **all-time (or N-year) high a while ago** and are now "
+    "sitting **just below it** — an old peak, a shallow pullback, no fresh breakout "
+    "yet. Pick the high window on the left."
 )
 
 with st.sidebar:
     st.header("Settings")
-    # 52-week high is always the intraday high (NSE's official basis).
-    basis = "high"
+
+    # --- High window: all-time (default) or an N-year high ---
+    win_mode = st.radio(
+        "High window", ["All-time", "N-year"], index=0, horizontal=True,
+        help="Screen against the all-time high (default) or an N-year high.",
+    )
+    if win_mode == "N-year":
+        years = st.number_input(
+            "Years", min_value=1, max_value=30, value=3, step=1,
+            help="N-year high — e.g. 3 = highest in the last 3 years.",
+        )
+        window = int(years)
+        win_label = f"{int(years)}-year"
+    else:
+        window = "ath"
+        win_label = "All-time"
 
     with st.expander("Advanced filters"):
         min_days = st.number_input(
             "High must be older than (days)", min_value=1, max_value=364,
             value=screener.DEFAULT_MIN_DAYS, step=1,
-            help="Exclude stocks that made a new 52-week high within this many days.",
+            help="Exclude stocks that made a new high (in the chosen window) within "
+                 "this many days.",
         )
         band_low, band_high = st.slider(
-            "Pullback band (% below 52w high)",
+            "Pullback band (% below the high)",
             min_value=0.0, max_value=25.0,
             value=(screener.DEFAULT_BAND_LOW, screener.DEFAULT_BAND_HIGH),
             step=0.5,
-            help="Keep stocks whose close is this % below the 52-week high.",
+            help="Keep stocks whose close is this % below the chosen-window high.",
         )
 
         st.divider()
@@ -425,7 +441,7 @@ with tab_screen:
     elif run or st.session_state.get("has_run"):
         st.session_state.has_run = True
         results = screener.screen_snapshot(
-            snap, basis=basis, min_days=int(min_days),
+            snap, window=window, min_days=int(min_days),
             band_low=float(band_low), band_high=float(band_high),
             fno_only=fno_only, qty_circuit_only=qty_circuit_only,
             qty_threshold=int(qty_threshold), qty_keep=qty_keep,
@@ -450,7 +466,7 @@ with tab_screen:
         opt_txt = (f"filters: **{'  AND  '.join(opt)}**" if opt
                    else "optional filters **off**")
         st.caption(
-            f"52w high older than **{int(min_days)}d**  •  "
+            f"**{win_label}** high older than **{int(min_days)}d**  •  "
             f"pullback **{band_low:g}–{band_high:g}%**  •  {opt_txt}"
         )
 
@@ -461,7 +477,8 @@ with tab_screen:
             # for the per-row quick-add, which reads LastClose/52wHigh).
             show_cols = ["Symbol", "PctFromHigh", "LastClose", "52wHigh",
                          "DaysSinceHigh", "HighDate", "AvgVol20d"]
-            display = results[[c for c in show_cols if c in results.columns]]
+            display = results[[c for c in show_cols if c in results.columns]].rename(
+                columns={"52wHigh": f"{win_label} High"})
 
             st.caption("💡 **Click any row** (checkbox on the left) to set a price "
                        "alert for that stock — a quick form pops up.")

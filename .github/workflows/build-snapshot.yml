@@ -35,8 +35,8 @@ jobs:
       - name: Install snapshot deps
         run: pip install -r requirements-snapshot.txt
 
-      - name: Build snapshot
-        run: python build_snapshot.py
+      - name: Update snapshot (append-only frontier + split re-backfill)
+        run: python update_history.py
 
       - name: Commit snapshot
         run: |
@@ -44,7 +44,7 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data/screener_snapshot.csv
           if git diff --cached --quiet; then
-            echo "no snapshot changes to commit"
+            echo "no changes to commit"
           else
             git commit -m "Update screener snapshot ($(date -u +%Y-%m-%d))"
             git push
