@@ -62,8 +62,9 @@ SNAPSHOT_COLUMNS = [
 ]
 
 RESULT_COLUMNS = [
-    "Symbol", "Company", "LastClose", "52wHigh", "HighDate",
-    "DaysSinceHigh", "PctFromHigh", "AvgVol20d", "F&O", "Band%", "ListingDate", "Basis",
+    "Symbol", "Company", "LastClose", "52wHigh", "ATHHigh", "HighDate",
+    "DaysSinceHigh", "PctFromHigh", "PctFromATH", "AvgVol20d",
+    "F&O", "Band%", "ListingDate", "Basis",
 ]
 
 
@@ -493,14 +494,18 @@ def screen_snapshot(
 
     is_ath = window is None or str(window).lower().startswith(("ath", "all"))
     win_label = "All-time" if is_ath else f"{window:g}-year"
+    ath = pd.to_numeric(df.get("HighATH"), errors="coerce")
+    pct_ath = ((ath - df["_close"]) / ath * 100.0).round(2)
     out = pd.DataFrame({
         "Symbol": df["Symbol"],
         "Company": df["Company"],
         "LastClose": df["_close"].round(2),
         "52wHigh": df["_high"].round(2),   # holds the selected-window high
+        "ATHHigh": ath.round(2),           # all-time high (shown alongside N-year)
         "HighDate": df["_hdate"].dt.date.astype(str),
         "DaysSinceHigh": df["_days"].astype(int),
         "PctFromHigh": df["_pct"].round(2),
+        "PctFromATH": pct_ath,
         "AvgVol20d": df["_vol"].astype(int),
         "F&O": df["is_fno"].map(lambda x: "Yes" if x else "No"),
         "Band%": df.apply(_band_disp, axis=1),

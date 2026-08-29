@@ -475,10 +475,19 @@ with tab_screen:
         else:
             # Columns shown in the table + downloads (full `results` is still used
             # for the per-row quick-add, which reads LastClose/52wHigh).
-            show_cols = ["Symbol", "PctFromHigh", "LastClose", "52wHigh",
-                         "DaysSinceHigh", "HighDate", "AvgVol20d"]
+            if window == "ath":
+                show_cols = ["Symbol", "PctFromHigh", "LastClose", "52wHigh",
+                             "DaysSinceHigh", "HighDate", "AvgVol20d"]
+                rename = {"52wHigh": "All-time High", "PctFromHigh": "% from High"}
+            else:
+                # N-year window: show the all-time high alongside for context
+                show_cols = ["Symbol", "PctFromHigh", "LastClose", "52wHigh",
+                             "ATHHigh", "PctFromATH", "DaysSinceHigh", "HighDate",
+                             "AvgVol20d"]
+                rename = {"52wHigh": f"{win_label} High", "ATHHigh": "All-time High",
+                          "PctFromHigh": f"% from {win_label}", "PctFromATH": "% from ATH"}
             display = results[[c for c in show_cols if c in results.columns]].rename(
-                columns={"52wHigh": f"{win_label} High"})
+                columns=rename)
 
             st.caption("💡 **Click any row** (checkbox on the left) to set a price "
                        "alert for that stock — a quick form pops up.")
