@@ -190,8 +190,9 @@ def main():
          "HighATH", "HighATHDate", "Frontier"]]
     out = s.merge_reference(price)
     out.to_csv(s.SNAPSHOT_PATH, index=False)
+    latest = out["LastDate"].dropna().max() if "LastDate" in out else "?"
     print(f"DONE: {len(out)} rows | updated {updated}, "
-          f"skipped(split-guard) {skipped_split}, as of {today}")
+          f"skipped(split-guard) {skipped_split} | snapshot now as of {latest}")
 
 
 if __name__ == "__main__":
