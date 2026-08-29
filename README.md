@@ -1,11 +1,13 @@
-# 📈 NSE 52-Week Pullback Screener
+# 📈 NSE Pullback Screener
 
 A shareable web app that screens **NSE main-board equities** for a specific setup:
 
-1. **Old high** — the stock made its 52-week high **more than 3 months ago** (i.e. it has *not* crossed/reclaimed that high recently), **and**
-2. **Shallow pullback** — the current close is **1%–10% below** that 52-week high.
+1. **Old high** — the stock made its **period high more than 3 months ago** (i.e. it has *not* crossed/reclaimed that high recently), **and**
+2. **Shallow pullback** — the current close is **1%–10% below** that period high.
 
 Net: stocks quietly consolidating just under an older peak, no fresh breakout yet.
+
+**Lookback horizon is selectable** (sidebar → *High lookback*): **52-week (1Y)**, **2Y**, **3Y**, **5Y**, or **All-time** (the default — the full history Yahoo returns). Prices are **split/bonus-adjusted** so a multi-year high isn't distorted by a split (an unadjusted high would make a split stock look 50–80% below its "high").
 
 Data comes from Yahoo Finance (`yfinance`). The NSE symbol list is **bundled** in
 `data/nse_equity_list.csv` so the hosted app never has to call NSE directly.
@@ -20,7 +22,7 @@ with your group.
 | Column | Meaning |
 |---|---|
 | `LastClose` | Latest closing price |
-| `52wHigh` | Highest price over the trailing 52 weeks (Intraday High or Daily Close — your choice) |
+| `PeriodHigh` | Highest (split-adjusted) price over the selected lookback horizon |
 | `HighDate` | Most recent date that high was touched |
 | `DaysSinceHigh` | Days since `HighDate` (must be > 90 to qualify) |
 | `PctFromHigh` | How far below the high, in % (must be 1–10 to qualify) |
@@ -28,6 +30,7 @@ with your group.
 | `F&O` | Whether the stock has futures/options (Yes/No; shown always, optionally filtered) |
 | `Band%` | Daily price band (20 / 10 / 5 / 2, `NB` = no band for F&O, `—` = unknown) |
 | `ListingDate` | NSE listing date (`—` if unknown) |
+| `Horizon` | Lookback window the high was measured over (52-week … All-time) |
 | `Basis` | Whether the high used Intraday High or Daily Close |
 
 Results are sorted by `PctFromHigh` ascending (closest to the high first).
@@ -169,11 +172,15 @@ git add data/nse_equity_list.csv && git commit -m "refresh universe" && git push
 ---
 
 ## Notes & caveats
-- **Unadjusted prices.** The 52-week high uses raw prices to match NSE's quote page.
-  A recent split/bonus can distort a stock's high — the app lists likely cases under
-  a ⚠ expander so you can eyeball them.
-- **Newly listed stocks** (< ~200 trading days of history) are skipped — a 52-week
-  high isn't meaningful yet.
+- **Adjusted prices.** Highs use split/bonus-adjusted prices so a multi-year high
+  isn't distorted by a split. As a result the 52-week figure can differ slightly
+  from NSE's quote page (which shows the unadjusted number) when a stock has split
+  within the year.
+- **All-time = as far back as Yahoo has data**, which is usually the listing date
+  but occasionally shorter — treat it as "max available history".
+- **Newly listed stocks** (< ~200 trading days of history) are skipped — a period
+  high isn't meaningful yet. For a stock younger than the chosen horizon, that
+  horizon's high is simply the high over all the history it has.
 - **SME/Emerge not included** — this is main board only (Yahoo's SME coverage is
   patchy). Can be added later via an NSE-bhavcopy data layer if needed.
 - Adjust the 3-month age and the 1–10% band any time under **Advanced filters**.

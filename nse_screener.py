@@ -1,11 +1,19 @@
 """
-Core screening logic for the NSE 52-Week Pullback Screener.
+Core screening logic for the NSE Pullback Screener.
 
-Filters (over the trailing 52 weeks, per stock):
-  1. The 52-week high must be OLD  -> it was set more than `min_days` ago
-     (i.e. price has NOT crossed/reclaimed that high in the last 3 months).
+Filters (over a selectable lookback horizon, per stock):
+  1. The period high must be OLD  -> it was set more than `min_days` ago
+     (i.e. price has NOT crossed/reclaimed that high recently).
   2. The current close is a shallow PULLBACK -> it sits `band_low`..`band_high`
-     percent BELOW the 52-week high (default 1%..10%).
+     percent BELOW the period high (default 1%..10%).
+
+The lookback horizon is selectable: 52-week (1Y), 2Y, 3Y, 5Y, or all-time
+(the full history Yahoo returns). The nightly snapshot precomputes the high for
+every horizon so the app only ever picks a column at request time.
+
+Prices are SPLIT/BONUS-ADJUSTED (auto_adjust=True). Over multi-year windows an
+unadjusted high is meaningless — a single split makes a stock look 50-80% below
+its "high" — so every horizon is computed on adjusted prices for consistency.
 
 Data source: Yahoo Finance via yfinance (works globally, incl. from cloud hosts).
 The NSE symbol universe is loaded from a bundled CSV so the app never has to
@@ -29,9 +37,28 @@ except Exception:  # pragma: no cover
 # ----------------------------------------------------------------------------
 # Config defaults (all overridable from the UI)
 # ----------------------------------------------------------------------------
-LOOKBACK_WINDOW_DAYS = 365      # "52 weeks" for the high computation
-FETCH_DAYS = 420                # calendar days of history to pull (buffer > 365)
+LOOKBACK_WINDOW_DAYS = 365      # "52 weeks" — the shortest (1Y) horizon
+FETCH_DAYS = 420                # legacy: calendar days of history (unused once period="max")
 MIN_TRADING_DAYS = 200          # skip stocks with too little history for a 52wk high
+
+# Selectable lookback horizons: label -> window length in calendar days.
+# None == the full available history ("all-time"). Every horizon is precomputed
+# in the nightly snapshot, so the app only picks a column at request time.
+HORIZONS: dict[str, int | None] = {
+    "1y": 365,
+    "2y": 730,
+    "3y": 1095,
+    "5y": 1825,
+    "max": None,
+}
+DEFAULT_HORIZON = "max"         # default to the all-time high
+HORIZON_LABELS = {
+    "1y": "52-week (1Y)",
+    "2y": "2-year",
+    "3y": "3-year",
+    "5y": "5-year",
+    "max": "All-time",
+}
 BATCH_SIZE = 50                 # tickers per yfinance download call (smaller = lower peak RAM)
 DOWNLOAD_THREADS = 6            # bounded yfinance workers (free host has a low thread ceiling)
 AVG_VOL_DAYS = 20               # window for the average-volume column
@@ -49,14 +76,38 @@ FO_PATH = "data/fo_stocks.csv"        # bundled F&O underlyings list
 BANDS_PATH = "data/price_bands.csv"   # nightly per-symbol price bands (broker feed)
 SNAPSHOT_PATH = "data/screener_snapshot.csv"  # nightly precomputed base metrics
 
-SNAPSHOT_COLUMNS = [
-    "Symbol", "Company", "LastClose", "HighH", "HighHDate", "HighC", "HighCDate",
-    "AvgVol20d", "is_fno", "Band", "ListingDate", "LastDate",
-]
+def _high_cols(basis: str, horizon: str) -> tuple[str, str]:
+    """(value_col, date_col) in the snapshot for a (basis, horizon) pair.
+
+    The 1Y horizon keeps the legacy unsuffixed names (HighH/HighHDate/HighC/
+    HighCDate) so older snapshots and the alerts tab keep working; longer
+    horizons are suffixed (HighH_2y, HighHDate_2y, ...).
+    """
+    b = "H" if str(basis).lower().startswith("h") else "C"
+    if horizon == "1y":
+        return f"High{b}", f"High{b}Date"
+    return f"High{b}_{horizon}", f"High{b}Date_{horizon}"
+
+
+def _horizon_high_columns() -> list[str]:
+    """All per-horizon high/date columns, in horizon then basis order."""
+    cols: list[str] = []
+    for hz in HORIZONS:
+        for basis in ("high", "close"):
+            cols.extend(_high_cols(basis, hz))
+    return cols
+
+
+SNAPSHOT_COLUMNS = (
+    ["Symbol", "Company", "LastClose"]
+    + _horizon_high_columns()
+    + ["AvgVol20d", "is_fno", "Band", "ListingDate", "LastDate"]
+)
 
 RESULT_COLUMNS = [
-    "Symbol", "Company", "LastClose", "52wHigh", "HighDate",
-    "DaysSinceHigh", "PctFromHigh", "AvgVol20d", "F&O", "Band%", "ListingDate", "Basis",
+    "Symbol", "Company", "LastClose", "PeriodHigh", "HighDate",
+    "DaysSinceHigh", "PctFromHigh", "AvgVol20d", "F&O", "Band%", "ListingDate",
+    "Horizon", "Basis",
 ]
 
 
@@ -167,8 +218,16 @@ def _chunks(seq: list, n: int):
         yield seq[i:i + n]
 
 
-def _download_batch(tickers: list[str], start, retries: int = 2) -> pd.DataFrame | None:
-    """Download one batch; retry a couple of times on transient failures/empties."""
+def _download_batch(
+    tickers: list[str], start=None, period: str | None = "max", retries: int = 2
+) -> pd.DataFrame | None:
+    """Download one batch; retry a couple of times on transient failures/empties.
+
+    Pulls the FULL available history (period="max") so the all-time and
+    multi-year horizons are covered, and uses adjusted prices so splits/bonuses
+    don't distort a multi-year high. Pass `start` (with period=None) to restrict
+    the window instead.
+    """
     if yf is None:
         raise RuntimeError("yfinance is not installed")
     last_err = None
@@ -176,9 +235,10 @@ def _download_batch(tickers: list[str], start, retries: int = 2) -> pd.DataFrame
         try:
             data = yf.download(
                 tickers,
-                start=start,
+                start=start if period is None else None,
+                period=period,
                 interval="1d",
-                auto_adjust=False,      # match NSE's displayed (unadjusted) 52wk high
+                auto_adjust=True,       # split/bonus-adjusted — required for multi-year highs
                 group_by="ticker",
                 threads=DOWNLOAD_THREADS,   # bounded — avoid exhausting the host thread limit
                 progress=False,
@@ -219,10 +279,17 @@ def _extract_one(data: pd.DataFrame, ticker: str) -> pd.DataFrame | None:
 # ----------------------------------------------------------------------------
 # Per-stock computation
 # ----------------------------------------------------------------------------
-def _evaluate_both(sub: pd.DataFrame) -> dict | None:
+def _evaluate_all(sub: pd.DataFrame) -> dict | None:
     """
-    Compute 52-week metrics for BOTH bases (intraday High and daily Close) for one
-    stock. Returns a snapshot dict, {"_short_history": True}, or None if unusable.
+    Compute period-high metrics for EVERY horizon (1Y/2Y/3Y/5Y/all-time) and BOTH
+    bases (intraday High and daily Close) for one stock. Returns a snapshot dict,
+    {"_short_history": True}, or None if unusable.
+
+    The short-history gate is applied on the 1Y window (unchanged): a stock needs
+    at least MIN_TRADING_DAYS of recent history to be meaningful. For a horizon
+    longer than the stock's available history, that horizon's high is simply the
+    high over all the history there is (so a 2-year-old stock's "5Y" == its
+    all-time high) — which is the sensible behaviour, not an error.
     """
     sub = sub.sort_index()
     close = sub["Close"].dropna()
@@ -230,12 +297,11 @@ def _evaluate_both(sub: pd.DataFrame) -> dict | None:
         return None
 
     last_date = close.index[-1]
-    cutoff = last_date - timedelta(days=LOOKBACK_WINDOW_DAYS)
-    window = sub.loc[sub.index >= cutoff]
-    if len(window) < MIN_TRADING_DAYS:
+    win_1y = sub.loc[sub.index >= last_date - timedelta(days=LOOKBACK_WINDOW_DAYS)]
+    if len(win_1y) < MIN_TRADING_DAYS:
         return {"_short_history": True}
 
-    last_close = float(window["Close"].dropna().iloc[-1])
+    last_close = float(win_1y["Close"].dropna().iloc[-1])
 
     def _high(series):
         s = series.dropna()
@@ -247,25 +313,31 @@ def _evaluate_both(sub: pd.DataFrame) -> dict | None:
         hd = s[s == hi].index.max()   # most-recent touch of the high
         return round(hi, 2), hd.date().isoformat()
 
-    high_h, date_h = _high(window["High"])
-    high_c, date_c = _high(window["Close"])
-    if high_h is None and high_c is None:
+    out: dict = {"LastClose": round(last_close, 2), "_last_date": last_date}
+    any_high = False
+    for hz, days in HORIZONS.items():
+        window = sub if days is None else sub.loc[sub.index >= last_date - timedelta(days=days)]
+        high_h, date_h = _high(window["High"])
+        high_c, date_c = _high(window["Close"])
+        any_high = any_high or high_h is not None or high_c is not None
+        hh_col, hd_col = _high_cols("high", hz)
+        hc_col, cd_col = _high_cols("close", hz)
+        out[hh_col], out[hd_col] = high_h, date_h
+        out[hc_col], out[cd_col] = high_c, date_c
+    if not any_high:
         return None
 
-    vol = window["Volume"].dropna()
+    vol = win_1y["Volume"].dropna()
     avg_vol = int(vol.tail(AVG_VOL_DAYS).mean()) if not vol.empty else 0
 
-    daily_ret = window["Close"].pct_change().abs()
+    # With adjusted prices a genuine split no longer shows as a jump; this now
+    # only flags residual data glitches, but it's cheap and harmless to keep.
+    daily_ret = win_1y["Close"].pct_change().abs()
     split_flag = bool((daily_ret > SPLIT_JUMP_PCT / 100.0).any())
 
-    return {
-        "LastClose": round(last_close, 2),
-        "HighH": high_h, "HighHDate": date_h,
-        "HighC": high_c, "HighCDate": date_c,
-        "AvgVol20d": avg_vol,
-        "_last_date": last_date,
-        "_split_flag": split_flag,
-    }
+    out["AvgVol20d"] = avg_vol
+    out["_split_flag"] = split_flag
+    return out
 
 
 def compute_snapshot(universe: pd.DataFrame, progress_cb=None):
@@ -277,7 +349,6 @@ def compute_snapshot(universe: pd.DataFrame, progress_cb=None):
     filtering. Returns (snapshot_df, stats) with columns == SNAPSHOT_COLUMNS.
     """
     stats = ScreenStats(universe=len(universe))
-    start = (datetime.now() - timedelta(days=FETCH_DAYS)).date()
 
     sym_by_ticker = dict(zip(universe["Ticker"], universe["Symbol"]))
     name_by_ticker = dict(zip(universe["Ticker"], universe["Company"]))
@@ -292,7 +363,7 @@ def compute_snapshot(universe: pd.DataFrame, progress_cb=None):
     done = 0
 
     for batch in _chunks(tickers, BATCH_SIZE):
-        data = _download_batch(batch, start)
+        data = _download_batch(batch, period="max")
         if data is None:
             stats.skipped_no_data.extend(sym_by_ticker[t] for t in batch)
         else:
@@ -302,7 +373,7 @@ def compute_snapshot(universe: pd.DataFrame, progress_cb=None):
                 if sub is None:
                     stats.skipped_no_data.append(sym)
                     continue
-                m = _evaluate_both(sub)
+                m = _evaluate_all(sub)
                 if m is None:
                     stats.skipped_no_data.append(sym)
                     continue
@@ -316,19 +387,21 @@ def compute_snapshot(universe: pd.DataFrame, progress_cb=None):
                 if latest_seen is None or ld > latest_seen:
                     latest_seen = ld
                 listing = listing_by_sym.get(sym)
-                rows.append({
+                row = {
                     "Symbol": sym,
                     "Company": name_by_ticker[t],
                     "LastClose": m["LastClose"],
-                    "HighH": m["HighH"], "HighHDate": m["HighHDate"],
-                    "HighC": m["HighC"], "HighCDate": m["HighCDate"],
                     "AvgVol20d": m["AvgVol20d"],
                     "is_fno": bool(fno_by_sym.get(sym, False)),
                     "Band": band_by_sym.get(sym),
                     "ListingDate": (listing.date().isoformat()
                                     if listing is not None and not pd.isna(listing) else ""),
                     "LastDate": ld.date().isoformat(),
-                })
+                }
+                # per-horizon high/date columns
+                for col in _horizon_high_columns():
+                    row[col] = m.get(col)
+                rows.append(row)
         del data
         gc.collect()
         done += len(batch)
@@ -359,9 +432,27 @@ def load_snapshot(path: str = SNAPSHOT_PATH) -> pd.DataFrame:
     return snap
 
 
+def available_horizons(snap: pd.DataFrame) -> list[str]:
+    """Which lookback horizons the snapshot actually carries columns for.
+
+    An older snapshot (built before multi-year support) only has the legacy 1Y
+    columns, so the UI can offer just what's present and degrade gracefully until
+    the next nightly rebuild fills in the multi-year columns. 1Y is always usable.
+    """
+    if snap is None or snap.empty:
+        return ["1y"]
+    out = [
+        hz for hz in HORIZONS
+        if _high_cols("high", hz)[0] in snap.columns
+        and _high_cols("close", hz)[0] in snap.columns
+    ]
+    return out or ["1y"]
+
+
 def screen_snapshot(
     snap: pd.DataFrame,
     basis: str = "high",
+    horizon: str = DEFAULT_HORIZON,
     min_days: int = DEFAULT_MIN_DAYS,
     band_low: float = DEFAULT_BAND_LOW,
     band_high: float = DEFAULT_BAND_HIGH,
@@ -377,11 +468,13 @@ def screen_snapshot(
     LIGHT step — the web app runs this. Applies the base screen + optional filters
     to the precomputed snapshot in memory (no network, no heavy compute).
 
-    Base (always): 52-week high older than `min_days` AND close `band_low`..
-    `band_high`% below it. Optional (AND when enabled): F&O; Qty+Circuit (avg vol
-    vs threshold by direction AND band==20%); Listing window (min..max months).
+    `horizon` selects the lookback window for the high (one of HORIZONS: 1y/2y/
+    3y/5y/max). Base (always): the period high is older than `min_days` AND the
+    close is `band_low`..`band_high`% below it. Optional (AND when enabled): F&O;
+    Qty+Circuit (avg vol vs threshold by direction AND band==20%); Listing window.
     """
     basis = "high" if str(basis).lower().startswith("h") else "close"
+    horizon = horizon if horizon in HORIZONS else DEFAULT_HORIZON
     if snap is None or snap.empty:
         return pd.DataFrame(columns=RESULT_COLUMNS)
 
@@ -389,7 +482,10 @@ def screen_snapshot(
     if "is_fno" in df.columns and df["is_fno"].dtype == object:
         df["is_fno"] = df["is_fno"].map(lambda x: str(x).strip().lower() in ("true", "1"))
     as_of = pd.to_datetime(df["LastDate"], errors="coerce").max()
-    hi_col, hd_col = ("HighH", "HighHDate") if basis == "high" else ("HighC", "HighCDate")
+    hi_col, hd_col = _high_cols(basis, horizon)
+    if hi_col not in df.columns or hd_col not in df.columns:
+        # snapshot predates this horizon — nothing to screen until the next rebuild
+        return pd.DataFrame(columns=RESULT_COLUMNS)
 
     df["_high"] = pd.to_numeric(df[hi_col], errors="coerce")
     df["_hdate"] = pd.to_datetime(df[hd_col], errors="coerce")
@@ -437,7 +533,7 @@ def screen_snapshot(
         "Symbol": df["Symbol"],
         "Company": df["Company"],
         "LastClose": df["_close"].round(2),
-        "52wHigh": df["_high"].round(2),
+        "PeriodHigh": df["_high"].round(2),
         "HighDate": df[hd_col],
         "DaysSinceHigh": df["_days"].astype(int),
         "PctFromHigh": df["_pct"].round(2),
@@ -445,6 +541,7 @@ def screen_snapshot(
         "F&O": df["is_fno"].map(lambda x: "Yes" if x else "No"),
         "Band%": df.apply(_band_disp, axis=1),
         "ListingDate": df["ListingDate"].map(_ld_disp),
+        "Horizon": HORIZON_LABELS.get(horizon, horizon),
         "Basis": "Intraday High" if basis == "high" else "Daily Close",
     }, columns=RESULT_COLUMNS)
     return out.sort_values("PctFromHigh").reset_index(drop=True)

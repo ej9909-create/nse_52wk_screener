@@ -212,7 +212,7 @@ def _maybe_open_alert_dialog(event, results: pd.DataFrame):
         return
     st.session_state["_alert_dlg_symbol"] = symbol
     current = float(row["LastClose"]) if pd.notna(row["LastClose"]) else 0.0
-    high52 = float(row["52wHigh"]) if pd.notna(row["52wHigh"]) else None
+    high52 = float(row["PeriodHigh"]) if pd.notna(row["PeriodHigh"]) else None
     _alert_dialog(symbol, current, high52)
 
 
@@ -308,27 +308,46 @@ def _render_alerts_tab(snap: pd.DataFrame):
 # ----------------------------------------------------------------------------
 st.title("📈 NSE 52-Week Pullback Screener")
 st.markdown(
-    "Stocks that made their **52-week high a while ago** and are now sitting "
-    "**just below it** — an old peak, a shallow pullback, no fresh breakout yet."
+    "Stocks that made their **period high a while ago** and are now sitting "
+    "**just below it** — an old peak, a shallow pullback, no fresh breakout yet. "
+    "Pick the lookback in the sidebar: 52-week up to **all-time** (default)."
 )
+
+snap, snap_as_of = load_snap()
 
 with st.sidebar:
     st.header("Settings")
-    # 52-week high is always the intraday high (NSE's official basis).
+    # The high is always the intraday high (NSE's official basis).
     basis = "high"
+
+    # Lookback horizon for the high (all-time by default). Only offer horizons
+    # the current snapshot actually carries — an older snapshot degrades to 52w.
+    _avail = screener.available_horizons(snap)
+    _default_h = screener.DEFAULT_HORIZON if screener.DEFAULT_HORIZON in _avail else _avail[-1]
+    horizon = st.selectbox(
+        "High lookback",
+        options=_avail,
+        index=_avail.index(_default_h),
+        format_func=lambda h: screener.HORIZON_LABELS.get(h, h),
+        help="Which window the high is measured over. All-time uses the full "
+             "history Yahoo returns. Prices are split/bonus-adjusted.",
+    )
+    if screener.DEFAULT_HORIZON not in _avail:
+        st.caption("ℹ️ Multi-year highs appear after the next nightly snapshot "
+                   "rebuild — showing 52-week for now.")
 
     with st.expander("Advanced filters"):
         min_days = st.number_input(
-            "High must be older than (days)", min_value=1, max_value=364,
+            "High must be older than (days)", min_value=1, max_value=2000,
             value=screener.DEFAULT_MIN_DAYS, step=1,
-            help="Exclude stocks that made a new 52-week high within this many days.",
+            help="Exclude stocks that made a new period high within this many days.",
         )
         band_low, band_high = st.slider(
-            "Pullback band (% below 52w high)",
+            "Pullback band (% below period high)",
             min_value=0.0, max_value=25.0,
             value=(screener.DEFAULT_BAND_LOW, screener.DEFAULT_BAND_HIGH),
             step=0.5,
-            help="Keep stocks whose close is this % below the 52-week high.",
+            help="Keep stocks whose close is this % below the period high.",
         )
 
         st.divider()
@@ -402,8 +421,6 @@ with st.sidebar:
         st.session_state.auth_ok = False
         st.rerun()
 
-snap, snap_as_of = load_snap()
-
 tab_screen, tab_alerts = st.tabs(["📈 Screener", "🔔 Price Alerts"])
 
 with tab_screen:
@@ -425,7 +442,7 @@ with tab_screen:
     elif run or st.session_state.get("has_run"):
         st.session_state.has_run = True
         results = screener.screen_snapshot(
-            snap, basis=basis, min_days=int(min_days),
+            snap, basis=basis, horizon=horizon, min_days=int(min_days),
             band_low=float(band_low), band_high=float(band_high),
             fno_only=fno_only, qty_circuit_only=qty_circuit_only,
             qty_threshold=int(qty_threshold), qty_keep=qty_keep,
@@ -450,17 +467,18 @@ with tab_screen:
         opt_txt = (f"filters: **{'  AND  '.join(opt)}**" if opt
                    else "optional filters **off**")
         st.caption(
-            f"52w high older than **{int(min_days)}d**  •  "
-            f"pullback **{band_low:g}–{band_high:g}%**  •  {opt_txt}"
+            f"**{screener.HORIZON_LABELS.get(horizon, horizon)}** high older than "
+            f"**{int(min_days)}d**  •  pullback **{band_low:g}–{band_high:g}%**  •  "
+            f"{opt_txt}"
         )
 
         if results.empty:
             st.warning("No stocks matched today's filters.")
         else:
             # Columns shown in the table + downloads (full `results` is still used
-            # for the per-row quick-add, which reads LastClose/52wHigh).
-            show_cols = ["Symbol", "PctFromHigh", "LastClose", "52wHigh",
-                         "DaysSinceHigh", "HighDate", "AvgVol20d"]
+            # for the per-row quick-add, which reads LastClose/PeriodHigh).
+            show_cols = ["Symbol", "PctFromHigh", "LastClose", "PeriodHigh",
+                         "DaysSinceHigh", "HighDate", "Horizon", "AvgVol20d"]
             display = results[[c for c in show_cols if c in results.columns]]
 
             st.caption("💡 **Click any row** (checkbox on the left) to set a price "
