@@ -1,20 +1,21 @@
 name: build-snapshot
 
-# Precomputes the daily screener snapshot (the heavy fetch) so the web app only
-# has to READ + filter it — keeping the app fast and reliable. Runs after market
-# close on weekdays (12:00 UTC = 17:30 IST), ~30 min after the price-band feed so
-# it picks up fresh bands. Commits data/screener_snapshot.csv.
+# WEEKLY Yahoo reconciliation (Saturdays). The daily same-day refresh is Angel
+# (update-daily.yml); this weekly Yahoo pass handles what Angel doesn't: split
+# re-adjustment of the frontier and refreshing the 20-day average volume. Runs
+# Saturday 12:07 UTC = 17:37 IST when Yahoo's week of data is fully settled.
+# Commits data/screener_snapshot.csv.
 
 on:
   schedule:
-    - cron: "7 12 * * 1-5"
+    - cron: "7 12 * * 6"
   workflow_dispatch: {}
 
 permissions:
   contents: write
 
 concurrency:
-  group: build-snapshot
+  group: screener-snapshot-write   # shared with update-daily so they never overlap
   cancel-in-progress: false
 
 jobs:
@@ -42,6 +43,7 @@ jobs:
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
           git add data/screener_snapshot.csv
           if git diff --cached --quiet; then
             echo "no changes to commit"

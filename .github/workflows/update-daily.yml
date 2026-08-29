@@ -1,0 +1,62 @@
+name: update-daily
+
+# Same-day price/high refresh via Angel One SmartAPI. Runs right after the NSE
+# close + closing auction (10:35 UTC = 16:05 IST) on weekdays, so the screener is
+# fresh the same evening (Yahoo's EOD bar lags ~a day and can't do this).
+# Commits data/screener_snapshot.csv. Needs the ANGEL_* repo secrets.
+
+on:
+  schedule:
+    - cron: "35 10 * * 1-5"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: screener-snapshot-write   # don't overlap with the weekly Yahoo job
+  cancel-in-progress: false
+
+jobs:
+  daily:
+    runs-on: ubuntu-latest
+    env:
+      OMP_NUM_THREADS: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      MKL_NUM_THREADS: "1"
+      NUMEXPR_NUM_THREADS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install deps
+        run: pip install -r requirements-bands.txt
+
+      - name: Angel same-day append
+        env:
+          ANGEL_API_KEY: ${{ secrets.ANGEL_API_KEY }}
+          ANGEL_CLIENT_CODE: ${{ secrets.ANGEL_CLIENT_CODE }}
+          ANGEL_PIN: ${{ secrets.ANGEL_PIN }}
+          ANGEL_TOTP_SECRET: ${{ secrets.ANGEL_TOTP_SECRET }}
+        run: |
+          if [ -z "$ANGEL_API_KEY" ]; then
+            echo "Angel secrets not set — skipping same-day append."
+            exit 0
+          fi
+          python update_angel.py
+
+      - name: Commit snapshot
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git pull --rebase origin main || true
+          git add data/screener_snapshot.csv
+          if git diff --cached --quiet; then
+            echo "no changes to commit"
+          else
+            git commit -m "Same-day snapshot update ($(date -u +%Y-%m-%d))"
+            git push
+            echo "committed same-day snapshot"
+          fi
