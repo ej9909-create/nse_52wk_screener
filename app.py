@@ -316,18 +316,23 @@ st.markdown(
 with st.sidebar:
     st.header("Settings")
 
-    # --- High window: all-time (default) or an N-year high ---
+    # --- High window: all-time (default), 52-week, or an N-year high ---
     win_mode = st.radio(
-        "High window", ["All-time", "N-year"], index=0, horizontal=True,
-        help="Screen against the all-time high (default) or an N-year high.",
+        "High window", ["All-time", "52-week", "N-year"], index=0, horizontal=True,
+        help="Screen against the all-time high (default), the 52-week high, or an "
+             "N-year high.",
     )
     if win_mode == "N-year":
         years = st.number_input(
-            "Years", min_value=1, max_value=30, value=3, step=1,
-            help="N-year high — e.g. 3 = highest in the last 3 years.",
+            "Years", min_value=2, max_value=30, value=3, step=1,
+            help="N-year high — e.g. 3 = highest in the last 3 years. "
+                 "(For 1 year, use the 52-week option.)",
         )
         window = int(years)
         win_label = f"{int(years)}-year"
+    elif win_mode == "52-week":
+        window = "52w"
+        win_label = "52-week"
     else:
         window = "ath"
         win_label = "All-time"

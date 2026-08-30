@@ -393,19 +393,48 @@ def merge_reference(price_df: pd.DataFrame) -> pd.DataFrame:
     return df[SNAPSHOT_COLUMNS]
 
 
+def _window_years(window) -> float | None:
+    """Resolve a window selector to a number of trailing years.
+
+    None => all-time high; 1.0 => 52-week high; any other number => that many
+    years. Accepts "ath"/"all-time", "52w"/"52-week", or a numeric year count.
+    """
+    if window is None:
+        return None
+    w = str(window).strip().lower()
+    if w in ("ath", "all", "alltime", "all-time"):
+        return None
+    if w in ("52w", "52wk", "52week", "52-week"):
+        return 1.0
+    try:
+        return float(window)
+    except (TypeError, ValueError):
+        return None
+
+
+def _window_label(window) -> str:
+    """Human label for the chosen high window."""
+    years = _window_years(window)
+    if years is None:
+        return "All-time"
+    if str(window).strip().lower().startswith("52"):
+        return "52-week"
+    return f"{years:g}-year"
+
+
 def _window_high(df: pd.DataFrame, window, as_of) -> tuple[pd.Series, pd.Series]:
     """Return (high, high_date) Series for the chosen window.
 
-    window = "ath" (all-time high, direct columns) or a number of years (derived
-    per-row from the encoded Frontier). Falls back to legacy HighH columns if the
-    snapshot predates the frontier format.
+    window = "ath" (all-time high, direct columns), "52w" (52-week high), or a
+    number of years (derived per-row from the encoded Frontier). Falls back to
+    legacy HighH columns if the snapshot predates the frontier format.
     """
-    is_ath = window is None or str(window).lower() in ("ath", "all", "alltime", "all-time")
-    if is_ath and "HighATH" in df.columns:
+    years = _window_years(window)
+    if years is None and "HighATH" in df.columns:
         return pd.to_numeric(df["HighATH"], errors="coerce"), \
             pd.to_datetime(df["HighATHDate"], errors="coerce")
-    if not is_ath and "Frontier" in df.columns:
-        cutoff = frontier.years_cutoff(float(window),
+    if years is not None and "Frontier" in df.columns:
+        cutoff = frontier.years_cutoff(years,
                                        as_of.date() if pd.notna(as_of) else None)
         highs, dates = [], []
         for s in df["Frontier"]:
@@ -492,8 +521,7 @@ def screen_snapshot(
     def _ld_disp(v):
         return v if isinstance(v, str) and v else "—"
 
-    is_ath = window is None or str(window).lower().startswith(("ath", "all"))
-    win_label = "All-time" if is_ath else f"{window:g}-year"
+    win_label = _window_label(window)
     ath = pd.to_numeric(df.get("HighATH"), errors="coerce")
     pct_ath = ((ath - df["_close"]) / ath * 100.0).round(2)
     out = pd.DataFrame({
