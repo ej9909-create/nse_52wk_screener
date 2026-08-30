@@ -40,7 +40,7 @@ MIN_DAYS = 200
 def _full_backfill_one(ticker: str) -> dict | None:
     """Fetch full adjusted history for one stock and build its store row."""
     try:
-        sub = yf.Ticker(ticker).history(period="max", auto_adjust=True)
+        sub = yf.Ticker(ticker).history(period="max", auto_adjust=False)
     except Exception:
         return None
     return _row_from_history(sub)
@@ -92,7 +92,7 @@ def main():
     for i in range(0, total, BATCH):
         chunk = tickers[i:i + BATCH]
         try:
-            data = yf.download(chunk, period=f"{RECENT_DAYS}d", auto_adjust=True,
+            data = yf.download(chunk, period=f"{RECENT_DAYS}d", auto_adjust=False,
                                actions=True, group_by="ticker", threads=THREADS,
                                progress=False)
         except Exception as e:

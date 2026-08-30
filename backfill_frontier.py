@@ -42,7 +42,7 @@ def main():
     for i in range(0, total, BATCH):
         chunk = tickers[i:i + BATCH]
         try:
-            data = yf.download(chunk, period="max", auto_adjust=True,
+            data = yf.download(chunk, period="max", auto_adjust=False,
                                group_by="ticker", threads=THREADS, progress=False)
         except Exception as e:
             print(f"  batch {i} error: {e}", flush=True)
