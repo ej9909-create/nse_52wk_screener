@@ -66,7 +66,7 @@ def token_map(target: set[str]) -> dict[str, str]:
         if row.get("exch_seg") != "NSE":
             continue
         sym = str(row.get("symbol", ""))
-        if not sym.endswith("-EQ"):
+        if not (sym.endswith("-EQ") or sym.endswith("-BE")):  # both NSE cash series
             continue
         name = str(row.get("name", "")).strip().upper()
         if name in target and name not in out:

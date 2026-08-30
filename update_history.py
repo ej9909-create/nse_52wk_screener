@@ -151,14 +151,18 @@ def main():
 
             close = rec["Close"].dropna()
             vol = rec["Volume"].dropna() if "Volume" in rec.columns else pd.Series(dtype=float)
-            row.update({
-                "Frontier": F.encode_frontier(fr),
-                "HighATH": ath_p, "HighATHDate": ath_d,
-                "LastClose": round(float(close.iloc[-1]), 2) if not close.empty else row["LastClose"],
-                "LastDate": close.index[-1].date().isoformat() if not close.empty else row["LastDate"],
-                "AvgVol20d": int(vol.tail(AVG_VOL_DAYS).mean()) if not vol.empty else row["AvgVol20d"],
-                "Company": names.get(sym, row.get("Company", "")),
-            })
+            row["Frontier"] = F.encode_frontier(fr)
+            row["HighATH"], row["HighATHDate"] = ath_p, ath_d
+            row["Company"] = names.get(sym, row.get("Company", ""))
+            if not vol.empty:
+                row["AvgVol20d"] = int(vol.tail(AVG_VOL_DAYS).mean())  # authoritative 20d avg
+            # ADVANCE-ONLY: never regress LastClose/LastDate below what's stored.
+            # Yahoo's EOD lags ~a day, so this must not clobber Angel's same-day data.
+            if not close.empty:
+                ylast = close.index[-1].date().isoformat()
+                if ylast > str(row.get("LastDate", "")):
+                    row["LastClose"] = round(float(close.iloc[-1]), 2)
+                    row["LastDate"] = ylast
             updated += 1
 
         del data
