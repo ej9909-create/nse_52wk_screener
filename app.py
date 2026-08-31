@@ -94,10 +94,154 @@ require_passcode()
 # Snapshot loader — the app just READS the nightly precomputed table (no fetch,
 # no heavy compute at request time). Filtering happens instantly in-memory.
 # ----------------------------------------------------------------------------
+# GitHub coordinates for the manual data-refresh fallback.
+GH_OWNER = "ej9909-create"
+GH_REPO = "nse_52wk_screener"
+GH_WORKFLOW = "update-daily.yml"
+SNAPSHOT_RAW_URL = (f"https://raw.githubusercontent.com/{GH_OWNER}/{GH_REPO}/"
+                    f"main/data/screener_snapshot.csv")
+
+
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def load_snap():
-    snap = screener.load_snapshot()
+def load_snap(source: str = "local"):
+    """Load the snapshot. source='local' reads the deployed file (fast, default);
+    source='remote' reads the latest committed file from GitHub, so the app
+    reflects fresh data even before Streamlit redeploys."""
+    if source == "remote":
+        txt = _fetch_remote_csv()
+        if txt is not None:
+            snap = screener.load_snapshot(io.StringIO(txt))
+            return snap, snap.attrs.get("as_of")
+    snap = screener.load_snapshot(screener.SNAPSHOT_PATH)
     return snap, snap.attrs.get("as_of")
+
+
+def _gh_headers():
+    """Auth headers for the GitHub API, or None if no token is configured."""
+    tok = None
+    try:
+        tok = st.secrets.get("gh_token")
+    except Exception:
+        tok = None
+    if not tok:
+        return None
+    return {"Authorization": f"Bearer {tok}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"}
+
+
+def _gh_newest_run():
+    """(id, status, conclusion) of the newest update-daily run, or None."""
+    h = _gh_headers()
+    if not h:
+        return None
+    import requests
+    url = (f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/actions/"
+           f"workflows/{GH_WORKFLOW}/runs?per_page=1")
+    try:
+        r = requests.get(url, headers=h, timeout=20)
+        runs = r.json().get("workflow_runs", []) if r.ok else []
+    except Exception:
+        return None
+    if not runs:
+        return None
+    w = runs[0]
+    return w["id"], w["status"], w.get("conclusion")
+
+
+def _gh_dispatch():
+    """Kick off the update-daily workflow. Returns (ok, message)."""
+    h = _gh_headers()
+    if not h:
+        return False, "no-token"
+    import requests
+    url = (f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/actions/"
+           f"workflows/{GH_WORKFLOW}/dispatches")
+    try:
+        r = requests.post(url, headers=h, json={"ref": "main"}, timeout=30)
+    except Exception as e:
+        return False, str(e)
+    if r.status_code == 204:
+        return True, "ok"
+    return False, f"HTTP {r.status_code}: {r.text[:200]}"
+
+
+def _fetch_remote_csv():
+    """CSV text of the latest committed snapshot, freshest source first.
+
+    Prefers the authenticated Contents API (always current) and falls back to the
+    raw CDN (can lag a few minutes) so it still works without a token.
+    """
+    import requests
+    h = _gh_headers()
+    if h:
+        api = (f"https://api.github.com/repos/{GH_OWNER}/{GH_REPO}/contents/"
+               f"data/screener_snapshot.csv?ref=main")
+        try:
+            r = requests.get(api, headers={**h, "Accept": "application/vnd.github.raw"},
+                             timeout=30)
+            if r.ok and r.text:
+                return r.text
+        except Exception:
+            pass
+    try:
+        r = requests.get(SNAPSHOT_RAW_URL, headers={"Cache-Control": "no-cache"},
+                         timeout=30)
+        if r.ok and r.text:
+            return r.text
+    except Exception:
+        pass
+    return None
+
+
+def _run_fetch_fallback():
+    """Dispatch the Angel same-day job, wait for it, then load the fresh data."""
+    if _gh_headers() is None:
+        st.warning(
+            "To enable the live fetch, add a **gh_token** secret — a GitHub "
+            "fine-grained token with **Actions: Read and write** on this repo — "
+            "under Manage app ▸ Settings ▸ Secrets. Until then use **Reload "
+            "snapshot**, or run *update-daily* from the repo's Actions tab.")
+        return
+    import time
+    before = _gh_newest_run()
+    ok, msg = _gh_dispatch()
+    if not ok:
+        st.error(f"Couldn't start the refresh job: {msg}")
+        return
+    with st.status("Fetching today's prices from Angel…", expanded=True) as status:
+        new_id = None
+        for _ in range(24):                     # ~2 min for the run to register
+            cur = _gh_newest_run()
+            if cur and (before is None or cur[0] != before[0]):
+                new_id = cur[0]
+                break
+            time.sleep(5)
+        if new_id is None:
+            status.update(state="error", label="Job dispatched but hasn't "
+                          "registered yet — wait a minute, then click Reload snapshot.")
+            return
+        concl = None
+        for i in range(72):                     # ~6 min to complete
+            cur = _gh_newest_run()
+            if cur and cur[0] == new_id and cur[1] == "completed":
+                concl = cur[2]
+                break
+            status.update(label=f"Fetching today's prices from Angel… "
+                          f"({(i + 1) * 5}s)")
+            time.sleep(5)
+        if concl == "success":
+            status.update(state="complete", label="Data updated ✓ — loading fresh "
+                          "snapshot.")
+            st.session_state.use_remote = True
+            st.cache_data.clear()
+            st.rerun()
+        elif concl is None:
+            status.update(state="error", label="Still running — click Reload "
+                          "snapshot in a minute to pick it up.")
+        else:
+            status.update(state="error", label=f"Refresh job failed ({concl}). "
+                          "Check the repo's Actions tab.")
 
 
 def to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -414,16 +558,27 @@ with st.sidebar:
         )
 
     run = st.button("▶ Run screener", type="primary", use_container_width=True)
-    if st.button("↻ Reload snapshot", use_container_width=True):
+
+    if st.button("↻ Reload snapshot", use_container_width=True,
+                 help="Re-read the latest committed data from GitHub — picks up a "
+                      "fresh snapshot without waiting for a redeploy/reboot."):
+        st.session_state.use_remote = True
         st.cache_data.clear()
         st.rerun()
-    st.caption("Results are instant — read from the nightly precomputed snapshot. "
-               "It refreshes automatically after market close.")
+
+    if st.button("🔄 Fetch today's prices", use_container_width=True,
+                 help="Run the Angel same-day job now, then load its result. Use if "
+                      "the data is still stale after market close."):
+        _run_fetch_fallback()
+
+    st.caption("Data refreshes automatically after market close. If it looks stale: "
+               "**Reload snapshot** pulls the latest committed data; **Fetch today's "
+               "prices** forces a fresh market pull.")
     if st.button("Log out", use_container_width=True):
         st.session_state.auth_ok = False
         st.rerun()
 
-snap, snap_as_of = load_snap()
+snap, snap_as_of = load_snap("remote" if st.session_state.get("use_remote") else "local")
 
 tab_screen, tab_alerts = st.tabs(["📈 Screener", "🔔 Price Alerts"])
 
