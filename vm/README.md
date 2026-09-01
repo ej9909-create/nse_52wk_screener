@@ -47,6 +47,11 @@ template so the real ones win.
 ## Verify
 
 ```bash
+# confirm the Telegram alert path reaches the price-alerts channel (sends nothing else)
+python3 vm/trigger_daily.py --test-alert
+```
+
+```bash
 # fire it once now (any time — it just refreshes to the latest close)
 sudo systemctl start nse-update.service
 journalctl -u nse-update -f          # watch it dispatch + wait

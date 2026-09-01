@@ -39,7 +39,7 @@ def _env(name, default=None, required=False):
     return v
 
 
-GH_TOKEN = _env("GH_TOKEN", required=True)
+GH_TOKEN = _env("GH_TOKEN")          # required for a real run; not for --test-alert
 OWNER = _env("GH_OWNER", "ej9909-create")
 REPO = _env("GH_REPO", "nse_52wk_screener")
 WF = _env("GH_WORKFLOW", "update-daily.yml")
@@ -67,7 +67,7 @@ def _gh(method, path, body=None):
 def telegram(text):
     if not (TG_TOKEN and TG_CHAT):
         print("(no Telegram creds; skipping alert)", file=sys.stderr)
-        return
+        return False
     try:
         url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
         data = json.dumps({"chat_id": TG_CHAT, "text": text}).encode()
@@ -75,8 +75,10 @@ def telegram(text):
             url, data=data, headers={"Content-Type": "application/json"},
             method="POST")
         urllib.request.urlopen(req, timeout=20).read()
+        return True
     except Exception as e:
         print(f"telegram send failed: {e}", file=sys.stderr)
+        return False
 
 
 def newest_run_id():
@@ -134,7 +136,28 @@ def one_cycle():
     return False, f"run {new_id} timed out"
 
 
+def test_alert():
+    """Send one test message to the Telegram channel and exit — verifies the
+    alert path without dispatching anything or touching data."""
+    stamp = datetime.now(IST).strftime("%Y-%m-%d %H:%M IST")
+    ok = telegram(f"✅ NSE screener test alert — Telegram path OK ({stamp}). "
+                  "Daily-refresh failures will be reported here.")
+    if ok:
+        print("Test alert sent — check the price-alerts channel.")
+    else:
+        print("Test alert NOT sent (see error above). Check TELEGRAM_BOT_TOKEN / "
+              "TELEGRAM_CHAT_ID in vm/.env.", file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
+    if "--test-alert" in sys.argv[1:]:
+        test_alert()
+        return
+    if not GH_TOKEN:
+        print("ERROR: missing env var GH_TOKEN", file=sys.stderr)
+        sys.exit(2)
+
     today = datetime.now(IST).strftime("%Y-%m-%d")
     print(f"[{datetime.now(IST):%Y-%m-%d %H:%M IST}] triggering update-daily "
           f"for {today}", flush=True)
