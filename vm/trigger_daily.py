@@ -31,6 +31,29 @@ ATTEMPTS = 3
 RETRY_GAP = 30            # seconds between whole-cycle retries
 
 
+def _load_env_file():
+    """Load KEY=VALUE lines from vm/.env (next to this script) into the process
+    env, WITHOUT overriding vars already set — so a manual run picks up vm/.env,
+    while under systemd the EnvironmentFile values still win."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    try:
+        with open(path) as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                k = k.strip()
+                v = v.strip().strip('"').strip("'")
+                if k and k not in os.environ:
+                    os.environ[k] = v
+    except FileNotFoundError:
+        pass
+
+
+_load_env_file()
+
+
 def _env(name, default=None, required=False):
     v = os.getenv(name, default)
     if required and not v:
