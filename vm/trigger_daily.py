@@ -190,10 +190,15 @@ def main():
         ok, detail = one_cycle()
         print(f"  attempt {i}/{ATTEMPTS}: {detail}", flush=True)
         if ok:
+            as_of = None
             try:
-                print(f"  snapshot as_of = {snapshot_as_of()}", flush=True)
+                as_of = snapshot_as_of()
             except Exception as e:
                 print(f"  as_of check failed (non-fatal): {e}", flush=True)
+            print(f"  snapshot as_of = {as_of}", flush=True)
+            note = "" if as_of == today else " (no newer session — market holiday?)"
+            telegram(f"✅ NSE screener updated for {today} — snapshot as_of "
+                     f"{as_of or 'unknown'}.{note}")
             print("DONE: update succeeded", flush=True)
             return
         last = detail

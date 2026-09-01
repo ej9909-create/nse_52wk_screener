@@ -4,8 +4,9 @@ GitHub Actions' scheduled cron drops runs unpredictably, so the daily data
 refresh is triggered from the always-on GCP VM instead (the same e2-micro that
 runs the alerter). A systemd timer fires once after market close and dispatches
 the `update-daily` workflow — the Angel fetch + commit still run in GitHub
-Actions, where the Angel secrets already live. On failure it retries, then
-alerts you on Telegram.
+Actions, where the Angel secrets already live. It reports the result to Telegram
+either way — a ✅ on success (with the snapshot's as-of date) and a ⚠️ if it still
+fails after 3 tries.
 
 ```
 VM systemd timer (Mon-Fri 16:05 IST)
