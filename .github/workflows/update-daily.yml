@@ -6,16 +6,9 @@ name: update-daily
 # Commits data/screener_snapshot.csv. Needs the ANGEL_* repo secrets.
 
 on:
-  schedule:
-    # Redundant post-close attempts (UTC): 16:05, 16:50, 18:10, 20:10 IST.
-    # GitHub silently drops scheduled runs under load, so a single slot isn't
-    # reliable. update_angel.py is advance-only + the commit step is a no-op when
-    # nothing changed, so extra runs are harmless — the first that lands refreshes
-    # the day, the rest exit clean. Off-the-hour minutes avoid top-of-hour drops.
-    - cron: "35 10 * * 1-5"
-    - cron: "20 11 * * 1-5"
-    - cron: "40 12 * * 1-5"
-    - cron: "40 14 * * 1-5"
+  # Triggered by the always-on GCP VM's systemd timer (Mon-Fri 16:05 IST) via
+  # vm/trigger_daily.py — GitHub's own scheduled cron dropped runs too often to
+  # rely on, so the schedule: block was removed. This stays dispatch-only.
   workflow_dispatch: {}
 
 permissions:
