@@ -28,7 +28,9 @@ cd nse_52wk_screener
 
 # 2. secrets (never committed)
 cp vm/.env.example vm/.env
-nano vm/.env        # paste GH_TOKEN (+ Telegram token/chat id)
+# reuse the price-alerts Telegram channel (same var names as the alerter):
+grep '^TELEGRAM_' ~/stock_price_alerter/.env >> vm/.env
+nano vm/.env        # paste GH_TOKEN; delete the blank TELEGRAM_* lines from the template
 
 # 3. install the timer
 bash vm/setup.sh
@@ -36,6 +38,11 @@ bash vm/setup.sh
 
 `GH_TOKEN` = a GitHub **fine-grained** token with **Actions: Read and write** on
 this repo, or a **classic** token with the `repo` + `workflow` scopes.
+
+**Telegram** — failure alerts go to the **same channel as your price alerts**.
+The `grep` above copies the alerter's `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
+into `vm/.env`; just delete the two empty `TELEGRAM_*` lines left from the
+template so the real ones win.
 
 ## Verify
 
