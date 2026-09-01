@@ -7,6 +7,10 @@ venv/
 # Streamlit secrets — NEVER commit the real passcode
 .streamlit/secrets.toml
 
+# VM trigger env (GitHub + Telegram tokens) — NEVER commit
+vm/.env
+.env
+
 # Local outputs
 output/
 *.xlsx
