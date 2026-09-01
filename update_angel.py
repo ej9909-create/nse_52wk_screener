@@ -149,8 +149,11 @@ def main():
         row = by_sym.get(sym)
         if row is None:
             continue
-        # only advance when the quote's trade date is newer than what we have
-        if str(row.get("LastDate")) >= tdate:
+        # Skip only if what we stored is from a strictly NEWER day than this
+        # quote. A same-day quote is allowed to refresh: a later run (e.g. after
+        # close) carries the true closing price, so the last run of the day wins.
+        # (The old `>=` froze the first — often pre-close — run of the day.)
+        if str(row.get("LastDate")) > tdate:
             stale += 1
             continue
 
@@ -168,6 +171,10 @@ def main():
             continue
 
         fr = F.decode_frontier(row.get("Frontier", ""))
+        # if an earlier run today already appended a point for tdate, drop it so
+        # a re-run replaces (not duplicates) today's high with the latest value.
+        if fr and fr[-1][0] == tdate:
+            fr.pop()
         while fr and fr[-1][1] <= high:
             fr.pop()
         fr.append((tdate, high))
