@@ -14,3 +14,6 @@ vm/.env
 # Local outputs
 output/
 *.xlsx
+
+# Phase-0 options probe (generated)
+options_flow/probe_universe.json
