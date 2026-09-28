@@ -33,18 +33,23 @@ def price(cp, F, K, T, r, sigma):
     return df * (K * _N(-d2) - F * _N(-d1))
 
 
-def implied_vol(cp, mkt_price, F, K, T, r=R_DEFAULT):
-    """Solve IV by bisection. Returns None when there's no time value to invert
-    (deep ITM at intrinsic, or non-positive inputs)."""
+IV_MAX = 1.5               # ceiling; above this the quote is stale/illiquid → None
+
+
+def implied_vol(cp, mkt_price, F, K, T, r=R_DEFAULT, iv_max=IV_MAX):
+    """Solve IV by bisection. Returns None when it can't be trusted: no time value
+    to invert (deep ITM at intrinsic), non-positive inputs, or a price so rich it
+    implies IV above `iv_max` — which for our large-cap/index universe means a
+    stale last-traded print on an illiquid deep-ITM/OTM strike, not a real vol."""
     if mkt_price is None or mkt_price <= 0 or F <= 0 or K <= 0 or T <= 0:
         return None
     df = math.exp(-r * T)
     intrinsic = df * max(0.0, (F - K) if cp == "CE" else (K - F))
     if mkt_price <= intrinsic + 1e-6:
         return None
-    lo, hi = 1e-4, 5.0
-    if price(cp, F, K, T, r, hi) < mkt_price:      # richer than 500% vol -> cap
-        return hi
+    lo, hi = 1e-4, iv_max
+    if price(cp, F, K, T, r, hi) < mkt_price:      # richer than the ceiling → junk
+        return None
     for _ in range(64):
         mid = 0.5 * (lo + hi)
         if price(cp, F, K, T, r, mid) > mkt_price:
