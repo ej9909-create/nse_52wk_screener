@@ -618,7 +618,8 @@ def _render_options_flow():
                "• auto-refreshes ~30s")
 
     view = st.radio("Scan", ["Volume surge", "OI build-up", "OI unwinding",
-                             "Price movers", "IV jump", "ATM Call vs Put"],
+                             "Price movers", "IV jump", "ATM Call vs Put",
+                             "Strike ladder"],
                     horizontal=True, key="flow_view")
     c1, c2, c3 = st.columns([2, 1, 1])
     unders = sorted(df["underlying"].dropna().unique())
@@ -644,19 +645,50 @@ def _render_options_flow():
             st.warning("No near-ATM contracts in view.")
             return
         agg = (near.groupby(["underlying", "kind"])
-               .agg(vol=(vol_c, "sum"), oi_chg=("oi_chg_day", "sum"),
-                    iv=("iv", "mean")).reset_index())
+               .agg(oi=("oi", "sum"), vol=(vol_c, "sum"),
+                    oi_chg=("oi_chg_day", "sum"), iv=("iv", "mean")).reset_index())
         piv = agg.pivot(index="underlying", columns="kind").fillna(0)
         piv.columns = [f"{k.upper()} {a}" for a, k in piv.columns]
+        if "PE oi" in piv and "CE oi" in piv:
+            piv["PCR"] = (piv["PE oi"] / piv["CE oi"].replace(0, pd.NA)).round(2)
         for base in ("vol", "oi_chg"):
             ce, pe = f"CE {base}", f"PE {base}"
             if ce in piv and pe in piv:
                 piv[f"{base} CE-PE"] = piv[ce] - piv[pe]
-        piv = piv.sort_values(piv.filter(like="vol CE-PE").columns[0], key=abs,
-                              ascending=False) if any("vol CE-PE" in c for c in piv.columns) else piv
-        st.caption(f"Near-ATM (±2%) {win} activity: CE vs PE per underlying "
-                   "(positive CE-PE = calls busier).")
+        if "vol CE-PE" in piv.columns:
+            piv = piv.sort_values("vol CE-PE", key=lambda s: s.abs(), ascending=False)
+        st.caption(f"Near-ATM (±2%) {win} activity per underlying • **PCR** = PE OI ÷ "
+                   "CE OI (>1 = put-heavy) • CE-PE positive = calls busier.")
         st.dataframe(piv.round(1), use_container_width=True)
+        return
+
+    if view == "Strike ladder":
+        u = pick[0] if pick else "NIFTY"
+        if len(pick) > 1:
+            st.info(f"Strike ladder shows one underlying — using **{u}**.")
+        ch = d[d["underlying"] == u].copy()
+        if ch.empty:
+            st.warning(f"No contracts for {u} in view.")
+            return
+        keep = ["strike", "ltp", "iv", oi_c, vol_c]
+        ce = ch[ch["kind"] == "CE"][keep].add_prefix("CE ")
+        pe = ch[ch["kind"] == "PE"][keep].add_prefix("PE ")
+        lad = ce.merge(pe, left_on="CE strike", right_on="PE strike", how="outer")
+        lad["Strike"] = lad["CE strike"].fillna(lad["PE strike"])
+        lad = lad.sort_values("Strike", ascending=False)
+        fwd = ch["forward"].dropna().iloc[0] if ch["forward"].notna().any() else None
+        show = lad[[f"CE {oi_c}", f"CE {vol_c}", "CE iv", "CE ltp", "Strike",
+                    "PE ltp", "PE iv", f"PE {vol_c}", f"PE {oi_c}"]].rename(columns={
+            f"CE {oi_c}": f"CE ΔOI {win}", f"CE {vol_c}": f"CE Vol {win}",
+            "CE iv": "CE IV", "CE ltp": "CE LTP", "PE ltp": "PE LTP",
+            "PE iv": "PE IV", f"PE {vol_c}": f"PE Vol {win}",
+            f"PE {oi_c}": f"PE ΔOI {win}"})
+        cap = f"**{u}** strike ladder — calls (left) vs puts (right)"
+        if fwd:
+            cap += f" • forward ≈ **{fwd:g}** (ATM)"
+        st.caption(cap + f" • ΔOI / Vol are the {win} change — see where flow "
+                   "concentrates across strikes.")
+        st.dataframe(show, use_container_width=True, hide_index=True)
         return
 
     if view == "Volume surge":
