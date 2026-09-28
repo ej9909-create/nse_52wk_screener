@@ -36,6 +36,7 @@ importlib.reload(nse_screener)
 screener = nse_screener
 
 import alerts_db  # Supabase-backed price alerts (degrades gracefully if unset)
+import options_db  # Supabase-backed live options-flow scan (degrades gracefully)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -580,7 +581,126 @@ with st.sidebar:
 
 snap, snap_as_of = load_snap("remote" if st.session_state.get("use_remote") else "local")
 
-tab_screen, tab_alerts = st.tabs(["📈 Screener", "🔔 Price Alerts"])
+_FLOW_NUM = ["strike", "dte", "ltp", "chg_pct", "oi", "oi_chg_day",
+             "oi_chg_day_pct", "volume", "vol_oi", "notional", "iv", "delta",
+             "gamma", "vega", "d5_oi", "d10_oi", "d15_oi", "d5_price_pct",
+             "d10_price_pct", "d15_price_pct", "d5_iv", "d10_iv", "d15_iv",
+             "d5_vol", "d10_vol", "d15_vol", "spread_pct", "forward"]
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _load_options_scan():
+    return options_db.load_scan()
+
+
+def _build_up_emoji(label):
+    return {"Long Buildup": "🟢 Long Buildup", "Short Buildup": "🔴 Short Buildup",
+            "Short Covering": "🟡 Short Covering", "Long Unwinding": "🟠 Long Unwinding",
+            }.get(label, label or "—")
+
+
+@st.fragment(run_every="30s")
+def _render_options_flow():
+    if not options_db.configured():
+        st.info("Options-flow scan isn't configured yet (Supabase creds unset).")
+        return
+    df = _load_options_scan()
+    if df is None or df.empty:
+        st.warning("No options-scan data yet. The collector writes during market "
+                   "hours (09:15–15:31 IST); check back once it has run a few minutes.")
+        return
+    for c in _FLOW_NUM:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
+    as_of = pd.to_datetime(df.get("as_of"), errors="coerce").max()
+    stamp = f"{as_of:%d %b %H:%M}" if pd.notna(as_of) else "—"
+    st.caption(f"Live options flow • **{len(df)}** contracts • as of **{stamp} IST** "
+               "• auto-refreshes ~30s")
+
+    view = st.radio("Scan", ["Volume surge", "OI build-up", "OI unwinding",
+                             "Price movers", "IV jump", "ATM Call vs Put"],
+                    horizontal=True, key="flow_view")
+    c1, c2, c3 = st.columns([2, 1, 1])
+    unders = sorted(df["underlying"].dropna().unique())
+    pick = c1.multiselect("Underlying", unders, default=[], key="flow_under")
+    side = c2.radio("Side", ["All", "CE", "PE"], horizontal=True, key="flow_side")
+    win = c3.radio("Window", ["5m", "10m", "15m"], horizontal=True, key="flow_win")
+    w = win[:-1]
+    oi_c, px_c, iv_c, vol_c = f"d{w}_oi", f"d{w}_price_pct", f"d{w}_iv", f"d{w}_vol"
+
+    d = df.copy()
+    if pick:
+        d = d[d["underlying"].isin(pick)]
+    if side != "All":
+        d = d[d["kind"] == side]
+    if d.empty:
+        st.warning("Nothing matches those filters.")
+        return
+
+    if view == "ATM Call vs Put":
+        near = d[(d["forward"] > 0) &
+                 ((d["strike"] - d["forward"]).abs() / d["forward"] <= 0.02)]
+        if near.empty:
+            st.warning("No near-ATM contracts in view.")
+            return
+        agg = (near.groupby(["underlying", "kind"])
+               .agg(vol=(vol_c, "sum"), oi_chg=("oi_chg_day", "sum"),
+                    iv=("iv", "mean")).reset_index())
+        piv = agg.pivot(index="underlying", columns="kind").fillna(0)
+        piv.columns = [f"{k.upper()} {a}" for a, k in piv.columns]
+        for base in ("vol", "oi_chg"):
+            ce, pe = f"CE {base}", f"PE {base}"
+            if ce in piv and pe in piv:
+                piv[f"{base} CE-PE"] = piv[ce] - piv[pe]
+        piv = piv.sort_values(piv.filter(like="vol CE-PE").columns[0], key=abs,
+                              ascending=False) if any("vol CE-PE" in c for c in piv.columns) else piv
+        st.caption(f"Near-ATM (±2%) {win} activity: CE vs PE per underlying "
+                   "(positive CE-PE = calls busier).")
+        st.dataframe(piv.round(1), use_container_width=True)
+        return
+
+    if view == "Volume surge":
+        d = d.sort_values(vol_c, ascending=False, na_position="last")
+    elif view == "OI build-up":
+        d = d.sort_values("oi_chg_day", ascending=False, na_position="last")
+    elif view == "OI unwinding":
+        d = d.sort_values("oi_chg_day", ascending=True, na_position="last")
+    elif view == "Price movers":
+        d = d.reindex(d[px_c].abs().sort_values(ascending=False,
+                                                na_position="last").index)
+    elif view == "IV jump":
+        d = d.reindex(d[iv_c].abs().sort_values(ascending=False,
+                                                na_position="last").index)
+
+    d = d.head(100).copy()
+    d["Contract"] = d["underlying"] + " " + d["strike"].map(
+        lambda x: f"{x:g}") + " " + d["kind"] + "  " + d["dte"].map(
+        lambda x: f"{int(x)}d" if pd.notna(x) else "")
+    d["Build-up"] = d["buildup"].map(_build_up_emoji)
+    show = d[["Contract", "ltp", "chg_pct", oi_c, "oi_chg_day", vol_c, "vol_oi",
+              "iv", iv_c, "delta", "Build-up", "spread_pct"]].rename(columns={
+        "ltp": "LTP", "chg_pct": "Chg%", oi_c: f"ΔOI {win}",
+        "oi_chg_day": "ΔOI day", vol_c: f"Vol {win}", "vol_oi": "Vol÷OI",
+        "iv": "IV%", iv_c: f"ΔIV {win}", "delta": "δ", "spread_pct": "Spread%"})
+    st.dataframe(show, use_container_width=True, hide_index=True,
+                 column_config={
+                     "LTP": st.column_config.NumberColumn(format="%.2f"),
+                     "Chg%": st.column_config.NumberColumn(format="%.1f%%"),
+                     f"ΔOI {win}": st.column_config.NumberColumn(format="%d"),
+                     "ΔOI day": st.column_config.NumberColumn(format="%d"),
+                     f"Vol {win}": st.column_config.NumberColumn(format="%d"),
+                     "Vol÷OI": st.column_config.NumberColumn(format="%.2f"),
+                     "IV%": st.column_config.NumberColumn(format="%.1f"),
+                     f"ΔIV {win}": st.column_config.NumberColumn(format="%.1f"),
+                     "δ": st.column_config.NumberColumn(format="%.2f"),
+                     "Spread%": st.column_config.NumberColumn(format="%.1f"),
+                 })
+    st.caption("Top 100 by the selected scan. ΔOI/ΔIV/Vol are the change over the "
+               "chosen window; ΔOI day is vs the day-open.")
+
+
+tab_screen, tab_alerts, tab_flow = st.tabs(
+    ["📈 Screener", "🔔 Price Alerts", "📊 Options Flow"])
 
 with tab_screen:
     # F&O (Filter 1) + Qty+Circuit (Filter 2) can never both be true — F&O stocks
@@ -678,3 +798,6 @@ with tab_screen:
 
 with tab_alerts:
     _render_alerts_tab(snap)
+
+with tab_flow:
+    _render_options_flow()
