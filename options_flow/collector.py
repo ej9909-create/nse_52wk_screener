@@ -224,6 +224,12 @@ def run_cycle(obj, uni, buffer, day_open):
             buf.pop(0)
 
     n = store.upsert_scan(rows)
+    # Drop tokens no longer in the universe (expiry rolled, ATM drifted) so the
+    # table stays ≈ the current universe instead of accumulating dead contracts.
+    try:
+        store.prune_stale((now_ist() - timedelta(minutes=10)).isoformat())
+    except Exception as e:
+        print(f"  prune skipped: {e}", file=sys.stderr)
     print(f"[{now_ist():%H:%M:%S}] fetched {len(fetched)}/{len(uni['tokens'])} "
           f"-> upserted {n} contracts", flush=True)
     return n

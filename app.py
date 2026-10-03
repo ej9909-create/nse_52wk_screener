@@ -613,6 +613,10 @@ def _render_options_flow():
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
     as_of = pd.to_datetime(df.get("as_of"), errors="coerce").max()
+    # keep only the latest snapshot — ignore any stale rows (rolled-off expiries)
+    if pd.notna(as_of):
+        df = df[pd.to_datetime(df["as_of"], errors="coerce")
+                >= as_of - pd.Timedelta(minutes=10)].copy()
     stamp = f"{as_of:%d %b %H:%M}" if pd.notna(as_of) else "—"
     st.caption(f"Live options flow • **{len(df)}** contracts • as of **{stamp} IST** "
                "• auto-refreshes ~30s")
