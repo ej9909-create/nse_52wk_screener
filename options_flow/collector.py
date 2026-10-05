@@ -33,6 +33,7 @@ if os.path.exists(_ENV):
 import universe as U
 import greeks as G
 import store
+import alerts
 
 IST = timezone(timedelta(hours=5, minutes=30))
 UNIVERSE_CACHE = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -144,7 +145,7 @@ def _ago(buf, minutes, key):
 
 
 # ----------------------------------------------------------------------------
-def run_cycle(obj, uni, buffer, day_open):
+def run_cycle(obj, uni, buffer, day_open, alert_state):
     fetched = fetch_full(obj, uni["tokens"])
     if len(fetched) < MIN_FETCH_FRAC * len(uni["tokens"]):
         print(f"  only {len(fetched)}/{len(uni['tokens'])} fetched — skipping upsert",
@@ -230,6 +231,12 @@ def run_cycle(obj, uni, buffer, day_open):
         store.prune_stale((now_ist() - timedelta(minutes=10)).isoformat())
     except Exception as e:
         print(f"  prune skipped: {e}", file=sys.stderr)
+    try:
+        pushed = alerts.maybe_push(rows, alert_state)
+        if pushed:
+            print(f"  pushed {pushed} alert(s) to Telegram", flush=True)
+    except Exception as e:
+        print(f"  alerts skipped: {e}", file=sys.stderr)
     print(f"[{now_ist():%H:%M:%S}] fetched {len(fetched)}/{len(uni['tokens'])} "
           f"-> upserted {n} contracts", flush=True)
     return n
@@ -247,7 +254,9 @@ def main():
           f"tokens={len(uni['tokens'])} missing={uni['meta']['missing']}", flush=True)
 
     obj = angel_login()
-    buffer, day_open, cur_day = {}, {}, now_ist().date()
+    buffer, day_open, alert_state, cur_day = {}, {}, {}, now_ist().date()
+    if alerts.configured():
+        print("  Telegram alerts: ON", flush=True)
 
     while True:
         if not market_open():
@@ -260,11 +269,11 @@ def main():
                 continue
         if now_ist().date() != cur_day:      # new trading day → rebuild + reset
             uni = U.build(strikes_each_side=args.strikes, cache_path=UNIVERSE_CACHE)
-            buffer, day_open, cur_day = {}, {}, now_ist().date()
+            buffer, day_open, alert_state, cur_day = {}, {}, {}, now_ist().date()
 
         t0 = time.time()
         try:
-            run_cycle(obj, uni, buffer, day_open)
+            run_cycle(obj, uni, buffer, day_open, alert_state)
         except Exception as e:
             print(f"cycle error: {e}", file=sys.stderr, flush=True)
         if args.once:

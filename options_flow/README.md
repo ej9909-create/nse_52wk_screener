@@ -47,6 +47,28 @@ systemctl list-timers 'optionsflow*'    # next start/stop
 sudo systemctl start optionsflow        # start now (test the service unit)
 ```
 
+## Telegram alerts (Phase 3)
+
+The collector pushes the sharpest events to Telegram each cycle (`alerts.py`):
+OI build-up/unwinding, volume surge, IV spike, and sharp price moves. It ranks
+them, applies a per-contract cooldown, caps how many go out per cycle, and sends
+one digest. Goes to `OF_TELEGRAM_CHAT_ID` if set, else the shared
+`TELEGRAM_CHAT_ID` (same channel as price alerts).
+
+Tunable via env (add to the collector's EnvironmentFile to calibrate after a live
+day — on expiry day especially, day-OI% runs hot):
+
+| var | default | meaning |
+|---|---|---|
+| `OPTIONS_ALERTS` | `1` | master on/off |
+| `OF_OI_PCT` | `20` | min \|day OI change %\| for build-up alerts |
+| `OF_D5_OI` | `100000` | min \|5-min OI change\| (units) |
+| `OF_D5_VOL` | `300000` | min 5-min volume for a surge |
+| `OF_IV_JUMP` | `5` | min \|IV change\| over the window (vol pts) |
+| `OF_PX_MOVE` | `30` | min \|price move %\| over the window |
+| `OF_COOLDOWN_MIN` | `20` | per-contract/rule cooldown |
+| `OF_MAX_PER_CYCLE` | `6` | max events per digest |
+
 ## Notes
 - Creds (Angel + Supabase) are reused from `~/stock_price_alerter/.env` via the
   service's `EnvironmentFile` — nothing new to configure.
