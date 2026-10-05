@@ -125,3 +125,19 @@ def maybe_push(rows, state):
     header = f"📈 Options flow • {datetime.now(IST):%H:%M IST}"
     _send(header + "\n\n" + "\n".join(t for _, _, t in pick))
     return len(pick)
+
+
+if __name__ == "__main__":
+    import sys
+    if "--test" in sys.argv[1:]:
+        if not (TG_TOKEN and TG_CHAT):
+            print("ERROR: TELEGRAM_BOT_TOKEN and a chat id "
+                  "(OF_TELEGRAM_CHAT_ID or TELEGRAM_CHAT_ID) must be set.",
+                  file=sys.stderr)
+            sys.exit(1)
+        ok = _send(f"✅ Options-flow alerts connected • "
+                   f"{datetime.now(IST):%d %b %H:%M IST}")
+        print(f"{'sent ✓' if ok else 'FAILED'} → chat {TG_CHAT}")
+        sys.exit(0 if ok else 1)
+    print("usage: python alerts.py --test   (sends one test message to the "
+          "configured options-alerts channel)")
